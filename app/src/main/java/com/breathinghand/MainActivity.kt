@@ -1,5 +1,6 @@
 package com.breathinghand
 
+import android.media.midi.MidiDeviceInfo
 import android.media.midi.MidiManager
 import android.os.Bundle
 import android.view.Choreographer
@@ -16,6 +17,18 @@ import com.breathinghand.core.OneEuroFilter
 import com.breathinghand.core.TouchMath
 import com.breathinghand.core.VoiceLeader
 
+/**
+ * MainActivity
+ *
+ * - Physics updates run at touch-event rate.
+ * - MIDI commits are coalesced to once-per-frame via Choreographer (Frame Latch).
+ * - Forensic logging:
+ *     * TouchLogger: raw input (uptime ms via MotionEvent.eventTime)
+ *     * MidiLogger: MIDI commit / all-notes-off markers (uptime ms)
+ *
+ * NOTE: This file assumes you created TouchLogger.kt and MidiLogger.kt in package com.breathinghand
+ * exactly as provided earlier.
+ */
 class MainActivity : AppCompatActivity() {
 
     private val touchState = MutableTouchPolar()
@@ -35,6 +48,10 @@ class MainActivity : AppCompatActivity() {
     private val frameCallback = Choreographer.FrameCallback {
         frameArmed = false
         if (pendingDirty) {
+            // Forensic marker: "the latch fired"
+            MidiLogger.logCommit(pendingState)
+
+            // The ONLY place motion-driven MIDI is committed
             voiceLeader?.update(pendingState)
             pendingDirty = false
         }
@@ -53,13 +70,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         try {
+            // --- FORENSIC: RAW TOUCH INPUT (before any math) ---
+            TouchLogger.log(event, overlay.width, overlay.height)
+            // --------------------------------------------------
+
             when (event.actionMasked) {
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL -> {
-                    cancelFrameCommit()          // stop any pending "next frame" MIDI commit
-                    voiceLeader?.allNotesOff()   // immediate silence
+                    cancelFrameCommit()
+
+                    // Forensic marker: "hard stop"
+                    MidiLogger.logAllNotesOff("ACTION_UP/CANCEL")
+                    voiceLeader?.allNotesOff()
+
                     TouchMath.reset()
                     radiusFilter.reset()
+
                     overlay.invalidate()
                     return true
                 }
@@ -68,21 +94,22 @@ class MainActivity : AppCompatActivity() {
             val cx = overlay.width / 2f
             val cy = overlay.height / 2f
 
-            // Update physics as fast as touch events arrive (no MIDI here)
+            // 1) Update physics as fast as touch events arrive (NO MIDI here)
             TouchMath.update(event, cx, cy, touchState)
 
             if (touchState.isActive) {
                 val tSec = (System.nanoTime() - startTime) / 1_000_000_000f
                 val rSmooth = radiusFilter.filter(touchState.radius, tSec)
 
+                // 2) Compute desired musical state
                 val changed = harmonicEngine.update(
                     touchState.angle,
                     rSmooth,
                     touchState.pointerCount
                 )
 
+                // 3) Latch newest desired state; commit at next VSync
                 if (changed) {
-                    // Latch the latest desired state; commit once per VSync frame
                     pendingState.setFrom(harmonicEngine.state)
                     pendingDirty = true
                     armFrameCommit()
@@ -99,12 +126,20 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         cancelFrameCommit()
+
+        MidiLogger.logAllNotesOff("onPause")
         voiceLeader?.allNotesOff()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cancelFrameCommit()
+
+        MidiLogger.logAllNotesOff("onDestroy")
+        try {
+            voiceLeader?.allNotesOff()
+        } catch (_: Exception) {
+        }
         try {
             voiceLeader?.close()
         } catch (_: Exception) {
@@ -121,12 +156,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun cancelFrameCommit() {
+        // safe even if not posted
         choreographer.removeFrameCallback(frameCallback)
         frameArmed = false
         pendingDirty = false
     }
 
-    // Copy only the stable musical identity fields (extend later if HarmonicState grows)
+    // Copy only stable musical identity fields (extend later if HarmonicState grows)
     private fun HarmonicState.setFrom(src: HarmonicState) {
         root = src.root
         quality = src.quality
@@ -147,7 +183,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val usbDevice = devices.find {
-                val name = it.properties.getString(android.media.midi.MidiDeviceInfo.PROPERTY_NAME) ?: ""
+                val name = it.properties.getString(MidiDeviceInfo.PROPERTY_NAME) ?: ""
                 !name.contains("Android", ignoreCase = true) &&
                         !name.contains("SunVox", ignoreCase = true) &&
                         !name.contains("Fluid", ignoreCase = true)
@@ -161,8 +197,8 @@ class MainActivity : AppCompatActivity() {
                             voiceLeader = VoiceLeader(MidiOut(port))
 
                             val name =
-                                usbDevice.properties.getString(android.media.midi.MidiDeviceInfo.PROPERTY_NAME)
-                                    ?: props(usbDevice)
+                                usbDevice.properties.getString(MidiDeviceInfo.PROPERTY_NAME)
+                                    ?: usbDevice.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
                                     ?: "USB MIDI Device"
 
                             runOnUiThread {
@@ -179,9 +215,5 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-    }
-
-    private fun props(device: android.media.midi.MidiDeviceInfo): String? {
-        return device.properties.getString(android.media.midi.MidiDeviceInfo.PROPERTY_PRODUCT)
     }
 }
