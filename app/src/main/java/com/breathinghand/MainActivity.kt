@@ -1,61 +1,78 @@
 package com.breathinghand
 
-import android.media.midi.MidiDeviceInfo
 import android.media.midi.MidiManager
 import android.os.Bundle
+import android.util.Log
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.breathinghand.core.*
-import kotlin.math.abs
+import java.io.IOException
 
 class MainActivity : AppCompatActivity() {
 
+    // --- State Holders ---
     private val touchState = MutableTouchPolar()
     private val radiusFilter = OneEuroFilter()
-    private val harmonicEngine = HarmonicEngine()
+
+    // Initialized in onCreate to allow density-aware scaling
+    private lateinit var harmonicEngine: HarmonicEngine
+
+    // Cached, density-scaled radii (px)
+    private var r1Px: Float = 0f
+    private var r2Px: Float = 0f
     private val startTime = System.nanoTime()
 
     private var voiceLeader: VoiceLeader? = null
     private lateinit var overlay: HarmonicOverlayView
 
-    // --- FRAME LATCH ---
+    // --- Frame Latch (Choreographer) ---
     private val choreographer: Choreographer by lazy { Choreographer.getInstance() }
-
     private val pendingState = HarmonicState()
     private var pendingDirty = false
     private var pendingRelease = false
     private var pendingReleaseReason: String = ""
     private var frameArmed = false
 
+    // --- Input & Hardware Abstraction ---
     // We store the active pointer IDs to pass to VoiceLeader
-    private val activePointers = IntArray(5) { -1 }
+    private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
+    private val inputHAL = SmartInputHAL(maxSlots = MusicalConstants.MAX_VOICES)
 
-    private val inputHAL = SmartInputHAL(maxSlots = 5)
+    // --- Gesture Intelligence ---
+    // P1 Fix: Reusable container to avoid allocation in the hot path
+    private val gestureContainer = TimbreNavigator.MutableGesture()
 
-    // Task 3: TimbreNavigator (translationally invariant Δx/Δy gesture space)
+    // Translationally invariant Δx/Δy gesture space
     private val timbreNav = TimbreNavigator(
-        maxPointerId = 64,
+        maxPointerId = MusicalConstants.MAX_POINTER_ID,
         deadzonePx = 6f,
         rangeXPx = 220f,
         rangeYPx = 220f
     )
-    // Stash Y + distance for next step (CC74 / macro), indexed by slot 0..4
-    private val lastDyNormBySlot = FloatArray(5) { 0f }
-    private val lastDistNormBySlot = FloatArray(5) { 0f }
 
+    // Stash Y + distance for next step (CC74 / macro), indexed by slot 0..4
+    // Using MAX_VOICES to ensure array bounds match
+    private val lastDyNormBySlot = FloatArray(MusicalConstants.MAX_VOICES) { 0f }
+    private val lastDistNormBySlot = FloatArray(MusicalConstants.MAX_VOICES) { 0f }
+
+    // --- Rendering Optimization ---
+    // P1 Fix: State tracking to throttle invalidate() calls
+    private var lastDrawnRoot = -1
+    private var lastDrawnQuality = -1
+    private var lastDrawnDensity = -1
+
+    // --- Choreographer Callback ---
     private val frameCallback = Choreographer.FrameCallback {
         frameArmed = false
 
         // 1. Commit New State
         if (pendingDirty) {
             MidiLogger.logCommit(pendingState)
-
             // PASS THE POINTERS! This enables sticky allocation.
             voiceLeader?.update(pendingState, activePointers)
-
             pendingDirty = false
         }
 
@@ -77,16 +94,30 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // P1 Fix: Normalize Radii by Display Density
+        // This ensures the instrument feels the same on a phone vs. tablet
+        val density = resources.displayMetrics.density
+        r1Px = MusicalConstants.BASE_RADIUS_INNER * density
+        r2Px = MusicalConstants.BASE_RADIUS_OUTER * density
+
+        harmonicEngine = HarmonicEngine(
+            sectorCount = MusicalConstants.SECTOR_COUNT,
+            r1 = r1Px,
+            r2 = r2Px
+        )
+
         overlay = HarmonicOverlayView(this, harmonicEngine)
         setContentView(overlay)
         setupMidi()
     }
 
-
+    /**
+     * Latch note-on velocity instantly on pointer-down (F_DOWN), using
+     * the attack-bypassed force sample from SmartInputHAL.
+     */
     private fun latchAttackVelocitiesFromHAL() {
-        // Latch note-on velocity instantly on pointer-down (F_DOWN), using
-        // the attack-bypassed force sample from SmartInputHAL.
-        for (s in 0 until 5) {
+        for (s in 0 until MusicalConstants.MAX_VOICES) {
             val flags = inputHAL.flags[s]
             if ((flags and SmartInputHAL.F_DOWN) == 0) continue
 
@@ -138,7 +169,8 @@ class MainActivity : AppCompatActivity() {
                     pendingRelease = true
                     pendingReleaseReason = if (event.actionMasked == MotionEvent.ACTION_UP) "ACTION_UP" else "ACTION_CANCEL"
                     armFrameCallback()
-                    overlay.invalidate()
+
+                    invalidateIfVisualChanged()
                     return true
                 }
             }
@@ -152,54 +184,56 @@ class MainActivity : AppCompatActivity() {
                 val tSec = (System.nanoTime() - startTime) / 1_000_000_000f
                 val rSmooth = radiusFilter.filter(touchState.radius, tSec)
 
-                // Expansion compensation
-                val expansion01 = ((rSmooth - 150f) / (350f - 150f)).coerceIn(0f, 1f)
+                // Expansion compensation with Density Scaling
+                val expansion01 = ((rSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
                 inputHAL.expansion01 = expansion01
 
                 // 1. Collect Active Pointer IDs for VoiceLeader
-                //    We basically copy what SmartInputHAL knows.
                 var activeCount = 0
-                for (s in 0 until 5) {
+                for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = inputHAL.slotPointerId[s]
                     activePointers[s] = pid
                     if (pid != SmartInputHAL.INVALID_ID) activeCount++
                     // Reset stored gesture values when slot is inactive
                     if (pid == SmartInputHAL.INVALID_ID) {
-                        lastDyNormBySlot[s] = 0f; lastDistNormBySlot[s] = 0f
+                        lastDyNormBySlot[s] = 0f
+                        lastDistNormBySlot[s] = 0f
                     }
                 }
 
-                // 2. Continuous Expression (Aftertouch)
-                //    We update this EVERY event, but flush once per frame.
-                for (s in 0 until 5) {
+                // 2. Continuous Expression (Aftertouch + Gestures)
+                for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = inputHAL.slotPointerId[s]
                     if (pid == SmartInputHAL.INVALID_ID) continue
 
                     val force = inputHAL.force[s]
                     val at = (force * 127f).toInt()
 
-                    // NEW: Route to specific Slot/Pointer
+                    // Route to specific Slot/Pointer
                     voiceLeader?.setSlotAftertouch(s, pid, at)
 
-                    // Task 3: TimbreNavigator gesture (Δx/Δy from per-pointer origin)
+                    // TimbreNavigator gesture (Δx/Δy from per-pointer origin)
                     val pIndex = event.findPointerIndex(pid)
                     if (pIndex >= 0) {
                         val x = event.getX(pIndex)
                         val y = event.getY(pIndex)
-                        val g = timbreNav.compute(pid, x, y)
 
-                        // Keep Y + distance for next step (CC74 / macro)
-                        lastDyNormBySlot[s] = g.dyNorm
-                        lastDistNormBySlot[s] = g.distNorm
+                        // P1 Fix: Zero-allocation compute
+                        if (timbreNav.compute(pid, x, y, gestureContainer)) {
+                            // Keep Y + distance for next step (if needed)
+                            lastDyNormBySlot[s] = gestureContainer.dyNorm
+                            lastDistNormBySlot[s] = gestureContainer.distNorm
 
-                        // Pitch Bend from X gesture (dxNorm)
-                        val bend14 = (8192 + (g.dxNorm * 8191f)).toInt().coerceIn(0, 16383)
-                        voiceLeader?.setSlotPitchBend(s, pid, bend14)
+                            // Pitch Bend from X gesture (dxNorm)
+                            val bend14 = (MusicalConstants.CENTER_PITCH_BEND +
+                                    (gestureContainer.dxNorm * 8191f)).toInt().coerceIn(0, 16383)
+                            voiceLeader?.setSlotPitchBend(s, pid, bend14)
 
-                        // CC74 from Y gesture (dyNorm). Invert so "drag up" increases timbre.
-                        val cc74 = (64 + (-g.dyNorm * 63f)).toInt().coerceIn(0, 127)
-                        voiceLeader?.setSlotCC74(s, pid, cc74)
-
+                            // CC74 from Y gesture (dyNorm). Invert so "drag up" increases timbre.
+                            val cc74 = (MusicalConstants.CENTER_CC74 +
+                                    (-gestureContainer.dyNorm * 63f)).toInt().coerceIn(0, 127)
+                            voiceLeader?.setSlotCC74(s, pid, cc74)
+                        }
                     }
                 }
 
@@ -213,23 +247,75 @@ class MainActivity : AppCompatActivity() {
                 if (changed) {
                     pendingState.setFrom(harmonicEngine.state)
                     pendingDirty = true
-
-                    // Note-on velocity is latched instantly on F_DOWN (see latchAttackVelocitiesFromHAL()).
-
                     armFrameCallback()
                 } else {
                     // Even if harmony didn't change, we might want to flush AT
                     armFrameCallback()
                 }
             }
-            overlay.invalidate()
+
+            // P1 Fix: Throttled Invalidation
+            // Only invalidate if logic state changed OR strictly necessary for animation
+            invalidateIfVisualChanged()
+
         } catch (e: Exception) {
             e.printStackTrace()
         }
         return true
     }
 
-    // ... [Rest of Lifecycle / Setup Code remains the same] ...
+    private fun HarmonicState.setFrom(src: HarmonicState) {
+        root = src.root
+        quality = src.quality
+        density = src.density
+    }
+
+    private fun invalidateIfVisualChanged() {
+        val s = harmonicEngine.state
+        val changed =
+            (s.root != lastDrawnRoot) ||
+            (s.quality != lastDrawnQuality) ||
+            (s.density != lastDrawnDensity)
+
+        if (changed) {
+            overlay.invalidate()
+            lastDrawnRoot = s.root
+            lastDrawnQuality = s.quality
+            lastDrawnDensity = s.density
+        }
+    }
+
+    private fun setupMidi() {
+        try {
+            val midiManager = getSystemService(MIDI_SERVICE) as? MidiManager ?: return
+            @Suppress("DEPRECATION")
+            val devices = midiManager.devices
+
+            val usbDevice = devices.firstOrNull { it.inputPortCount > 0 }
+            if (usbDevice != null) {
+                midiManager.openDevice(usbDevice, { device ->
+                    if (device != null) {
+                        val port = device.openInputPort(0)
+                        if (port != null) {
+                            voiceLeader = VoiceLeader(MidiOut(port))
+                            runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
+                        } else {
+                            // P0 Fix: Close device if port fails to avoid resource leak
+                            Log.w("MIDI", "Failed to open input port")
+                            try { device.close() } catch (e: IOException) { e.printStackTrace() }
+                        }
+                    }
+                }, null)
+            }
+        } catch (e: Exception) {
+            // P0 Fix: Log explicit errors
+            Log.e("MIDI", "Setup failed", e)
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // LIFECYCLE & HELPERS
+    // -------------------------------------------------------------------
 
     private fun armFrameCallback() {
         if (!frameArmed) {
@@ -261,36 +347,6 @@ class MainActivity : AppCompatActivity() {
             MotionEvent.ACTION_POINTER_UP -> true
             else -> false
         }
-    }
-
-    private fun HarmonicState.setFrom(src: HarmonicState) {
-        root = src.root
-        quality = src.quality
-        density = src.density
-    }
-
-    private fun setupMidi() {
-        try {
-            val midiManager = getSystemService(MIDI_SERVICE) as? MidiManager ?: return
-            @Suppress("DEPRECATION")
-            val devices = midiManager.devices // Simplified for brevity
-            // ... (Use existing device finding logic) ...
-
-            // For the Refactor output, assume standard setup code fits here.
-            // Just ensuring voiceLeader is initialized with MidiOut.
-            val usbDevice = devices.firstOrNull { it.inputPortCount > 0 } // Quick fallback
-            if (usbDevice != null) {
-                midiManager.openDevice(usbDevice, { device ->
-                    if (device != null) {
-                        val port = device.openInputPort(0)
-                        if (port != null) {
-                            voiceLeader = VoiceLeader(MidiOut(port))
-                            runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
-                        }
-                    }
-                }, null)
-            }
-        } catch (e: Exception) { e.printStackTrace() }
     }
 
     override fun onPause() {

@@ -5,14 +5,7 @@ import kotlin.math.sqrt
 
 /**
  * Translationally invariant gesture layer.
- * Touch-down defines an origin per pointerId.
- *
- * Outputs:
- * - dxNorm in [-1..+1]
- * - dyNorm in [-1..+1]
- * - distNorm in [0..1]
- *
- * No allocations in hot path.
+ * Zero-allocation version using MutableGesture.
  */
 class TimbreNavigator(
     private val maxPointerId: Int = 64,
@@ -23,9 +16,8 @@ class TimbreNavigator(
     private val originX = FloatArray(maxPointerId) { Float.NaN }
     private val originY = FloatArray(maxPointerId) { Float.NaN }
 
-    data class Gesture(val dxNorm: Float, val dyNorm: Float, val distNorm: Float) {
-        companion object { val ZERO = Gesture(0f, 0f, 0f) }
-    }
+    // Reusable mutable holder to avoid allocation per compute()
+    data class MutableGesture(var dxNorm: Float = 0f, var dyNorm: Float = 0f, var distNorm: Float = 0f)
 
     fun onPointerDown(pointerId: Int, x: Float, y: Float) {
         if (pointerId !in 0 until maxPointerId) return
@@ -39,12 +31,21 @@ class TimbreNavigator(
         originY[pointerId] = Float.NaN
     }
 
-    fun compute(pointerId: Int, x: Float, y: Float): Gesture {
-        if (pointerId !in 0 until maxPointerId) return Gesture.ZERO
+    /**
+     * Computes gesture data into the provided MutableGesture.
+     * Returns true if a valid gesture was computed (origin exists), false otherwise.
+     */
+    fun compute(pointerId: Int, x: Float, y: Float, outGesture: MutableGesture): Boolean {
+        if (pointerId !in 0 until maxPointerId) return false
 
         val ox = originX[pointerId]
         val oy = originY[pointerId]
-        if (ox.isNaN() || oy.isNaN()) return Gesture.ZERO
+        if (ox.isNaN() || oy.isNaN()) {
+            outGesture.dxNorm = 0f
+            outGesture.dyNorm = 0f
+            outGesture.distNorm = 0f
+            return false
+        }
 
         var dx = x - ox
         var dy = y - oy
@@ -58,6 +59,9 @@ class TimbreNavigator(
         // Euclidean distance in normalized space, clamped to 0..1
         val dist = sqrt(dxNorm * dxNorm + dyNorm * dyNorm).coerceIn(0f, 1f)
 
-        return Gesture(dxNorm, dyNorm, dist)
+        outGesture.dxNorm = dxNorm
+        outGesture.dyNorm = dyNorm
+        outGesture.distNorm = dist
+        return true
     }
 }

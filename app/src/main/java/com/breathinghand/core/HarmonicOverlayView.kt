@@ -25,9 +25,10 @@ class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) 
         canvas.drawCircle(cx, cy, r, paint)
         canvas.drawCircle(cx, cy, r, fillPaint)
 
-        // 2. Draw 12 Sectors
-        val sectorRad = (2.0 * Math.PI / 12.0)
-        for (i in 0 until 12) {
+        // 2. Draw Sectors
+        val sectorCount = MusicalConstants.SECTOR_COUNT
+        val sectorRad = (2.0 * Math.PI / sectorCount.toDouble())
+        for (i in 0 until sectorCount) {
             val a = i * sectorRad
             canvas.drawLine(cx, cy, cx + r * sin(a).toFloat(), cy - r * cos(a).toFloat(), paint)
         }

@@ -2,12 +2,12 @@ package com.breathinghand.core
 
 import kotlin.math.*
 
-data class HarmonicState(var root: Int = 0, var quality: Int = 2, var density: Int = 3)
+data class HarmonicState(var root: Int = 0, var quality: Int = 1, var density: Int = 3)
 
 class HarmonicEngine(
-    private val sectorCount: Int = 12,
-    private val r1: Float = 150f,
-    private val r2: Float = 350f
+    private val sectorCount: Int = MusicalConstants.SECTOR_COUNT,
+    private val r1: Float = MusicalConstants.BASE_RADIUS_INNER,
+    private val r2: Float = MusicalConstants.BASE_RADIUS_OUTER
 ) {
     val state = HarmonicState()
 

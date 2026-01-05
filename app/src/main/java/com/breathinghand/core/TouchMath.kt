@@ -5,11 +5,13 @@ import kotlin.math.atan2
 import kotlin.math.sqrt
 
 object TouchMath {
-    fun reset() {}
+    fun reset() {
+        // No-op: TouchMath is stateless. Kept for lifecycle symmetry.
+    }
 
     fun update(event: MotionEvent, cx: Float, cy: Float, outResult: MutableTouchPolar) {
         val count = event.pointerCount
-        val n = count.coerceAtMost(5) // Track up to 5 fingers
+        val n = count.coerceAtMost(MusicalConstants.MAX_VOICES) // Track up to MAX_VOICES fingers
 
         if (n == 0) {
             outResult.isActive = false
@@ -35,8 +37,8 @@ object TouchMath {
                 val dy = event.getY(i) - handY
                 sumSpread += sqrt(dx * dx + dy * dy)
             }
-            // Multiplier 2.5f tunes the feel so a comfortable spread hits the thresholds
-            outResult.radius = (sumSpread / n) * 2.5f
+            // Multiplier tunes the feel so a comfortable spread hits the thresholds
+            outResult.radius = (sumSpread / n) * MusicalConstants.SPREAD_RADIUS_MULTIPLIER
         } else {
             // Single finger: Distance from screen center
             val dx = handX - cx
