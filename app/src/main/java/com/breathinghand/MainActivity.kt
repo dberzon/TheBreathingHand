@@ -9,6 +9,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.breathinghand.core.*
+import com.breathinghand.core.midi.MidiOut as MidiOutTransport
 import java.io.IOException
 
 class MainActivity : AppCompatActivity() {
@@ -39,7 +40,9 @@ class MainActivity : AppCompatActivity() {
     // --- Input & Hardware Abstraction ---
     // We store the active pointer IDs to pass to VoiceLeader
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
-    private val inputHAL = SmartInputHAL(maxSlots = MusicalConstants.MAX_VOICES)
+    private val touchDriver = AndroidTouchDriver(maxSlots = MusicalConstants.MAX_VOICES)
+    private val touchFrame: TouchFrame
+        get() = touchDriver.frame
 
     // --- Gesture Intelligence ---
     // P1 Fix: Reusable container to avoid allocation in the hot path
@@ -116,41 +119,40 @@ class MainActivity : AppCompatActivity() {
      * Latch note-on velocity instantly on pointer-down (F_DOWN), using
      * the attack-bypassed force sample from SmartInputHAL.
      */
-    private fun latchAttackVelocitiesFromHAL() {
+    private fun latchAttackVelocitiesFromFrame() {
         for (s in 0 until MusicalConstants.MAX_VOICES) {
-            val flags = inputHAL.flags[s]
-            if ((flags and SmartInputHAL.F_DOWN) == 0) continue
+            val flags = touchFrame.flags[s]
+            if ((flags and TouchFrame.F_DOWN) == 0) continue
 
-            val pid = inputHAL.slotPointerId[s]
-            if (pid != SmartInputHAL.INVALID_ID) {
-                var v = (1 + (inputHAL.force[s] * 126f)).toInt().coerceIn(1, 127)
-                if ((flags and SmartInputHAL.F_WACK) != 0) {
+            val pid = touchFrame.pointerIds[s]
+            if (pid != TouchFrame.INVALID_ID) {
+                var v = (1 + (touchFrame.force01[s] * 126f)).toInt().coerceIn(1, 127)
+                if ((flags and TouchFrame.F_WACK) != 0) {
                     v = (v + 20).coerceIn(1, 127)
                 }
                 voiceLeader?.setSlotVelocity(s, pid, v)
             }
 
-            // Consume DOWN so we don't re-latch every MOVE/frame.
-            inputHAL.flags[s] = inputHAL.flags[s] and SmartInputHAL.F_DOWN.inv()
+            // Consume DOWN so we don't re-latch every MOVE/frame if flags persist.
+            touchFrame.flags[s] = flags and TouchFrame.F_DOWN.inv()
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         try {
             TouchLogger.log(event, overlay.width, overlay.height)
-            inputHAL.ingest(event)
-            latchAttackVelocitiesFromHAL()
+            touchDriver.ingest(event)
+            latchAttackVelocitiesFromFrame()
 
-            // Capture gesture origin on pointer down; clear on pointer up/cancel
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                    val idx = event.actionIndex
-                    val pid = event.getPointerId(idx)
-                    timbreNav.onPointerDown(pid, event.getX(idx), event.getY(idx))
+            // Gesture origin capture purely from frame flags (KMP-friendly)
+            for (s in 0 until MusicalConstants.MAX_VOICES) {
+                val pid = touchFrame.pointerIds[s]
+                if (pid == TouchFrame.INVALID_ID) continue
+                val f = touchFrame.flags[s]
+                if ((f and TouchFrame.F_DOWN) != 0) {
+                    timbreNav.onPointerDown(pid, touchFrame.x[s], touchFrame.y[s])
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
-                    val idx = event.actionIndex
-                    val pid = event.getPointerId(idx)
+                if ((f and TouchFrame.F_UP) != 0) {
                     timbreNav.onPointerUp(pid)
                 }
             }
@@ -178,7 +180,7 @@ class MainActivity : AppCompatActivity() {
             // Physics Update
             val cx = overlay.width / 2f
             val cy = overlay.height / 2f
-            TouchMath.update(event, cx, cy, touchState)
+            TouchMath.update(touchFrame, cx, cy, touchState)
 
             if (touchState.isActive) {
                 val tSec = (System.nanoTime() - startTime) / 1_000_000_000f
@@ -186,16 +188,16 @@ class MainActivity : AppCompatActivity() {
 
                 // Expansion compensation with Density Scaling
                 val expansion01 = ((rSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
-                inputHAL.expansion01 = expansion01
+                touchDriver.expansion01 = expansion01
 
                 // 1. Collect Active Pointer IDs for VoiceLeader
                 var activeCount = 0
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
-                    val pid = inputHAL.slotPointerId[s]
+                    val pid = touchFrame.pointerIds[s]
                     activePointers[s] = pid
-                    if (pid != SmartInputHAL.INVALID_ID) activeCount++
+                    if (pid != TouchFrame.INVALID_ID) activeCount++
                     // Reset stored gesture values when slot is inactive
-                    if (pid == SmartInputHAL.INVALID_ID) {
+                    if (pid == TouchFrame.INVALID_ID) {
                         lastDyNormBySlot[s] = 0f
                         lastDistNormBySlot[s] = 0f
                     }
@@ -203,10 +205,10 @@ class MainActivity : AppCompatActivity() {
 
                 // 2. Continuous Expression (Aftertouch + Gestures)
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
-                    val pid = inputHAL.slotPointerId[s]
-                    if (pid == SmartInputHAL.INVALID_ID) continue
+                    val pid = touchFrame.pointerIds[s]
+                    if (pid == TouchFrame.INVALID_ID) continue
 
-                    val force = inputHAL.force[s]
+                    val force = touchFrame.force01[s]
                     val at = (force * 127f).toInt()
 
                     // Route to specific Slot/Pointer
@@ -241,7 +243,8 @@ class MainActivity : AppCompatActivity() {
                 val changed = harmonicEngine.update(
                     touchState.angle,
                     rSmooth,
-                    touchState.pointerCount
+                    touchState.pointerCount,
+                    touchFrame.tMs
                 )
 
                 if (changed) {
@@ -297,7 +300,7 @@ class MainActivity : AppCompatActivity() {
                     if (device != null) {
                         val port = device.openInputPort(0)
                         if (port != null) {
-                            voiceLeader = VoiceLeader(MidiOut(port))
+                            voiceLeader = VoiceLeader(MidiOutTransport(port))
                             runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
                         } else {
                             // P0 Fix: Close device if port fails to avoid resource leak

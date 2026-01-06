@@ -20,8 +20,8 @@ class HarmonicEngine(
     private var stableFingerCount = 0
     private var rawFingerCount = 0
 
-    fun update(angleRad: Float, radius: Float, currentFingerCount: Int): Boolean {
-        val now = System.currentTimeMillis()
+    fun update(angleRad: Float, radius: Float, currentFingerCount: Int, nowMs: Long): Boolean {
+        val now = nowMs
         val prevRoot = state.root
         val prevQual = state.quality
         val prevDens = state.density
