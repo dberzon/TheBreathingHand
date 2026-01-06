@@ -9,7 +9,10 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.breathinghand.core.*
-import com.breathinghand.core.midi.MidiOut as MidiOutTransport
+import com.breathinghand.core.midi.AndroidForensicLogger
+import com.breathinghand.core.midi.AndroidMonotonicClock
+import com.breathinghand.core.midi.AndroidMidiSink
+import com.breathinghand.core.midi.MidiOut
 import java.io.IOException
 
 class MainActivity : AppCompatActivity() {
@@ -300,7 +303,9 @@ class MainActivity : AppCompatActivity() {
                     if (device != null) {
                         val port = device.openInputPort(0)
                         if (port != null) {
-                            voiceLeader = VoiceLeader(MidiOutTransport(port))
+                            val sink = AndroidMidiSink(port)
+                            val midi = MidiOut(sink, AndroidMonotonicClock, AndroidForensicLogger)
+                            voiceLeader = VoiceLeader(midi)
                             runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
                         } else {
                             // P0 Fix: Close device if port fails to avoid resource leak

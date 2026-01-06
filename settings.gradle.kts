@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Breathing hand"
 include(":app")
- 
+include(":shared")
