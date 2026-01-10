@@ -332,8 +332,15 @@ class MainActivity : AppCompatActivity() {
                     val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
                     bb.put(bytes)
                     bb.rewind()
+                    val before = internalSynth.getLoadedSampleNames().toSet()
                     internalSynth.registerSampleFromByteBuffer(bb, root, lo, hi)
-                    Toast.makeText(this, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show()
+                    val after = internalSynth.getLoadedSampleNames().toSet()
+                    val added = after - before
+                    if (added.isNotEmpty()) {
+                        Toast.makeText(this, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Registration attempted but no sample was added (check logs)", Toast.LENGTH_LONG).show()
+                    }
                 }
             } catch (e: java.io.IOException) {
                 Toast.makeText(this, "Failed to register sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
@@ -431,6 +438,7 @@ class MainActivity : AppCompatActivity() {
         val regions = pendingSfzRegions ?: return
         val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, treeUri)
         val missing = mutableListOf<String>()
+        val before = internalSynth.getLoadedSampleNames().toSet()
         regions.forEach { r ->
             val name = r.sampleName
             var doc = tree?.findFile(name)
@@ -456,9 +464,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        if (missing.isEmpty()) {
+        val after = internalSynth.getLoadedSampleNames().toSet()
+        val added = after - before
+        if (missing.isEmpty() && added.isNotEmpty()) {
             Toast.makeText(this, "Imported ${regions.size} regions from SFZ", Toast.LENGTH_SHORT).show()
             pendingSfzRegions = null
+            return
+        }
+        if (missing.isEmpty() && added.isEmpty()) {
+            Toast.makeText(this, "Attempted import but no samples were registered (check logs)", Toast.LENGTH_LONG).show()
             return
         }
         // Need user help to pick missing files
@@ -494,8 +508,14 @@ class MainActivity : AppCompatActivity() {
                 val regions = pendingSfzRegions ?: listOf()
                 val base = expectedName.substringAfterLast('/')
                 val name = getDisplayNameLocal(uri) ?: base
+                val before = internalSynth.getLoadedSampleNames().toSet()
                 regions.filter { it.sampleName == expectedName || it.sampleName == base }.forEach { r ->
                     internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, name)
+                }
+                val after = internalSynth.getLoadedSampleNames().toSet()
+                val added = after - before
+                if (added.isEmpty()) {
+                    Toast.makeText(this, "Selected file registered but no samples were added (check logs)", Toast.LENGTH_LONG).show()
                 }
             }
         } catch (e: java.io.IOException) {

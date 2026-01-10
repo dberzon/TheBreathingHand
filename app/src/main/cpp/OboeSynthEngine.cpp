@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <android/log.h>
 #include <oboe/Oboe.h>
 #include <atomic>
 #include <array>
@@ -501,15 +502,26 @@ private:
 
     void loadWavetableFromBuffer(const uint8_t *data, size_t size) {
         if (!data || size == 0) return;
+        __android_log_print(ANDROID_LOG_INFO, "OBoeEngine", "loadWavetableFromBuffer: size=%zu", size);
         auto wav = std::make_shared<Wavetable>(data, size);
         setCustomWavetable(wav);
+        __android_log_print(ANDROID_LOG_INFO, "OBoeEngine", "Custom wavetable set");
     }
 
     // Public: register a sampled region (build per-octave band tables)
     void registerSampleFromBufferPublic(const uint8_t *data, size_t size, int rootNote, int loKey, int hiKey, const std::string &name) {
-        if (!data || size == 0) return;
+        if (!data || size == 0) {
+            __android_log_print(ANDROID_LOG_WARN, "OBoeEngine", "registerSampleFromBufferPublic called with empty buffer");
+            return;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "OBoeEngine", "registerSampleFromBufferPublic: size=%zu root=%d lo=%d hi=%d name=%s", size, rootNote, loKey, hiKey, name.c_str());
+
         // Create base single-cycle wavetable from sample
         Wavetable base(data, size);
+        if (!base.parsedOk()) {
+            __android_log_print(ANDROID_LOG_WARN, "OBoeEngine", "registerSampleFromBufferPublic: failed to parse sample data, unsupported format or corrupt file");
+            return;
+        }
         std::vector<float> baseTable(Wavetable::kWavetableSize);
         std::memcpy(baseTable.data(), base.data(), sizeof(float) * Wavetable::kWavetableSize);
 
@@ -542,6 +554,9 @@ private:
         auto newList = std::make_shared<SampleList>(*samplesList_);
         newList->push_back(region);
         std::atomic_store_explicit(&samplesList_, newList, std::memory_order_release);
+
+        auto names = getLoadedSampleNames();
+        __android_log_print(ANDROID_LOG_INFO, "OBoeEngine", "After register: total samples=%zu", names.size());
     }
 };
 
