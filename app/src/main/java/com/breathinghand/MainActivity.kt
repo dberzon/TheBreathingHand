@@ -125,7 +125,7 @@ class MainActivity : AppCompatActivity() {
         mpeSwitch.text = "MPE Mode   "
         mpeSwitch.textSize = 14f
         mpeSwitch.setTextColor(-1) // White text
-        mpeSwitch.isChecked = false // Default to Standard MIDI (safer for generic synths)
+        mpeSwitch.isChecked = true // Default to MPE (enable internal synth polyphony)
 
         // Position: Top Right
         val params = FrameLayout.LayoutParams(
