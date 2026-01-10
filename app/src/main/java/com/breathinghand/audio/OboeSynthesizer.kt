@@ -75,6 +75,12 @@ class OboeSynthesizer {
         }
     }
 
+    fun registerSampleFromByteBuffer(buffer: java.nio.ByteBuffer, rootNote: Int, loKey: Int, hiKey: Int, name: String? = null) {
+        if (nativeHandle != 0L) {
+            nativeRegisterSample(nativeHandle, buffer, buffer.capacity().toLong(), rootNote, loKey, hiKey, name)
+        }
+    }
+
     fun close() {
         if (nativeHandle != 0L) {
             nativeStop(nativeHandle)
@@ -96,4 +102,19 @@ class OboeSynthesizer {
     private external fun nativeSetEnvelope(handle: Long, channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float)
     private external fun nativeSetWaveform(handle: Long, index: Int)
     private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
+    private external fun nativeRegisterSample(handle: Long, buffer: java.nio.ByteBuffer?, size: Long, rootNote: Int, loKey: Int, hiKey: Int, name: String?)
+
+    fun getLoadedSampleNames(): Array<String> {
+        if (nativeHandle == 0L) return arrayOf()
+        return nativeGetLoadedSampleNames(nativeHandle) ?: arrayOf()
+    }
+
+    fun unloadSample(index: Int) {
+        if (nativeHandle == 0L) return
+        nativeUnloadSample(nativeHandle, index)
+    }
+
+    private external fun nativeGetLoadedSampleNames(handle: Long): Array<String>?
+    private external fun nativeUnloadSample(handle: Long, index: Int)
 }
+

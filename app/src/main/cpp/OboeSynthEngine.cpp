@@ -38,6 +38,8 @@ struct Voice {
     std::atomic<bool> active{false};
     float phase = 0.0f;
     float amplitude = 0.0f;
+    // Voice-specific wavetable pointer (atomic for safe swap)
+    std::atomic<const float*> wavetablePtr{nullptr};
 
     // Envelope state
     enum EnvStage { Idle = 0, Attack, Decay, Sustain, Release };
@@ -57,6 +59,9 @@ public:
     enum WaveformId { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
     static constexpr int kNumWavetables = 4;
     static constexpr int WAVE_CUSTOM_ID = 100;
+    // Sample mapping mode (per-sample per-octave band tables)
+    static constexpr int kSampleBandCount = 11; // e.g. -5..+5 octaves
+    static constexpr int kSampleBandMid = (kSampleBandCount / 2);
 
     OboeSynthEngine() {
         generateWavetables();
@@ -101,6 +106,28 @@ public:
         voice.phase = 0.0f;
         voice.active.store(true);
 
+        // Reset per-voice wavetable pointer. Choose sample region table if available
+        auto samples = std::atomic_load_explicit(&samplesList_, std::memory_order_acquire);
+        const float* chosenTable = nullptr;
+        if (samples && !samples->empty()) {
+            for (const auto &reg : *samples) {
+                if (!reg) continue;
+                if (note >= reg->loKey && note <= reg->hiKey) {
+                    int band = (note - reg->rootNote) / 12 + kSampleBandMid;
+                    if (band < 0) band = 0;
+                    if (band >= kSampleBandCount) band = kSampleBandCount - 1;
+                    chosenTable = reg->bandTables[band].data();
+                    break;
+                }
+            }
+        }
+        if (chosenTable) {
+            voice.wavetablePtr.store(chosenTable);
+        } else {
+            // clear to indicate default engine tables
+            voice.wavetablePtr.store(nullptr);
+        }
+
         // Reset envelope for attack
         voice.envStage = Voice::Attack;
         voice.envLevel = 0.0f;
@@ -134,6 +161,36 @@ public:
         const float semitones = static_cast<float>(centered) / 8192.0f * 2.0f;
         const float ratio = std::pow(2.0f, semitones / 12.0f);
         channels_[channel].bendRatio.store(ratio);
+    }
+
+    // Public wrapper for registering a mapped sample from a raw buffer
+    void registerSampleFromBuffer(const uint8_t *data, size_t size, int rootNote, int loKey, int hiKey, const char *name) {
+        std::string sname = name ? std::string(name) : std::string();
+        registerSampleFromBufferPublic(data, size, rootNote, loKey, hiKey, sname);
+    }
+
+    // List names of loaded samples (thread-safe snapshot)
+    std::vector<std::string> getLoadedSampleNames() {
+        std::vector<std::string> names;
+        auto list = std::atomic_load_explicit(&samplesList_, std::memory_order_acquire);
+        if (!list) return names;
+        for (size_t i = 0; i < list->size(); ++i) {
+            auto &r = (*list)[i];
+            if (r) {
+                if (!r->name.empty()) names.push_back(r->name);
+                else names.push_back(std::string("sample_") + std::to_string(i));
+            }
+        }
+        return names;
+    }
+
+    void unloadSampleByIndex(int index) {
+        auto oldList = std::atomic_load_explicit(&samplesList_, std::memory_order_acquire);
+        if (!oldList) return;
+        if (index < 0 || index >= static_cast<int>(oldList->size())) return;
+        auto newList = std::make_shared<SampleList>(*oldList);
+        newList->erase(newList->begin() + index);
+        std::atomic_store_explicit(&samplesList_, newList, std::memory_order_release);
     }
 
     void channelPressure(int channel, int pressure) {
@@ -202,27 +259,39 @@ public:
 
                 // Wavetable lookup (linear interpolation)
                 // Choose table based on active waveform and note number (per-MIDI-note)
-                int waveId = activeWaveformId_.load();
                 float tableSample = 0.0f;
-                if (waveId == WAVE_CUSTOM_ID) {
-                    auto wav = std::atomic_load_explicit(&customWavetable_, std::memory_order_acquire);
-                    if (wav) {
-                        tableSample = wav->render(voice.phase);
-                    } else {
-                        tableSample = std::sinf(kTwoPi * voice.phase);
-                    }
+                // Priority: per-voice wavetablePtr (sample mapping) > custom wavetable > builtin per-note wavetables > fallback sine
+                const float* voiceTable = std::atomic_load_explicit(&voice.wavetablePtr, std::memory_order_acquire);
+                if (voiceTable) {
+                    const float idx = voice.phase * static_cast<float>(kWavetableSize);
+                    int i0 = static_cast<int>(idx) % kWavetableSize;
+                    if (i0 < 0) i0 += kWavetableSize;
+                    int i1 = (i0 + 1) % kWavetableSize;
+                    const float frac = idx - static_cast<float>(i0);
+                    tableSample = voiceTable[i0] * (1.0f - frac) + voiceTable[i1] * frac;
                 } else {
-                    int note = voice.noteNumber.load();
-                    if (note < 0 || note >= kNumNotes) note = 69; // default to A4 if unknown
-                    const float* table = tablePtrs_[waveId][note];
-                    if (table) {
-                        const float idx = voice.phase * static_cast<float>(kWavetableSize);
-                        int i0 = static_cast<int>(idx) % kWavetableSize;
-                        int i1 = (i0 + 1) % kWavetableSize;
-                        const float frac = idx - static_cast<float>(i0);
-                        tableSample = table[i0] * (1.0f - frac) + table[i1] * frac;
+                    int waveId = activeWaveformId_.load();
+                    if (waveId == WAVE_CUSTOM_ID) {
+                        auto wav = std::atomic_load_explicit(&customWavetable_, std::memory_order_acquire);
+                        if (wav) {
+                            tableSample = wav->render(voice.phase);
+                        } else {
+                            tableSample = std::sinf(kTwoPi * voice.phase);
+                        }
                     } else {
-                        tableSample = std::sinf(kTwoPi * voice.phase);
+                        int note = voice.noteNumber.load();
+                        if (note < 0 || note >= kNumNotes) note = 69; // default to A4 if unknown
+                        const float* table = tablePtrs_[waveId][note];
+                        if (table) {
+                            const float idx = voice.phase * static_cast<float>(kWavetableSize);
+                            int i0 = static_cast<int>(idx) % kWavetableSize;
+                            if (i0 < 0) i0 += kWavetableSize;
+                            int i1 = (i0 + 1) % kWavetableSize;
+                            const float frac = idx - static_cast<float>(i0);
+                            tableSample = table[i0] * (1.0f - frac) + table[i1] * frac;
+                        } else {
+                            tableSample = std::sinf(kTwoPi * voice.phase);
+                        }
                     }
                 }
                 const float aftertouch = 0.5f + 0.5f * channels_[ch].aftertouch.load();
@@ -384,8 +453,45 @@ private:
     // Custom wavetable (loaded from user-supplied .wav)
     std::shared_ptr<Wavetable> customWavetable_ = nullptr;
 
+    // Sample mapping storage (atomic shared_ptr to vector of regions)
+    struct SampleRegion {
+        int rootNote = 60;
+        int loKey = 0;
+        int hiKey = 127;
+        std::string name;
+        // Per-band tables [band][kWavetableSize]
+        std::array<std::vector<float>, kSampleBandCount> bandTables;
+    };
+
+    using SampleList = std::vector<std::shared_ptr<SampleRegion>>;
+    std::shared_ptr<SampleList> samplesList_ = std::make_shared<SampleList>();
+
     std::atomic<double> sampleRate_{48000.0};
     std::atomic<bool> isPlaying_{false};
+
+    // Helper: apply simple zero-phase lowpass to a table (non-realtime, called at load time)
+    void lowpassTable(const float *in, float *out, int n, float cutoffHz) {
+        if (cutoffHz <= 0.0f) {
+            // copy
+            for (int i = 0; i < n; ++i) out[i] = in[i];
+            return;
+        }
+        const float sr = static_cast<float>(sampleRate_.load());
+        const float x = std::exp(-2.0f * static_cast<float>(M_PI) * cutoffHz / sr);
+        const float a = 1.0f - x;
+        // forward pass
+        float s = in[0];
+        for (int i = 0; i < n; ++i) {
+            s += a * (in[i] - s);
+            out[i] = s;
+        }
+        // backward pass for approximate zero-phase
+        s = out[n-1];
+        for (int i = n-1; i >= 0; --i) {
+            s += a * (out[i] - s);
+            out[i] = s;
+        }
+    }
 
     // Load a user-supplied wavetable and switch engine to use it safely
     void setCustomWavetable(const std::shared_ptr<Wavetable> &wav) {
@@ -397,6 +503,45 @@ private:
         if (!data || size == 0) return;
         auto wav = std::make_shared<Wavetable>(data, size);
         setCustomWavetable(wav);
+    }
+
+    // Public: register a sampled region (build per-octave band tables)
+    void registerSampleFromBufferPublic(const uint8_t *data, size_t size, int rootNote, int loKey, int hiKey, const std::string &name) {
+        if (!data || size == 0) return;
+        // Create base single-cycle wavetable from sample
+        Wavetable base(data, size);
+        std::vector<float> baseTable(Wavetable::kWavetableSize);
+        std::memcpy(baseTable.data(), base.data(), sizeof(float) * Wavetable::kWavetableSize);
+
+        // Prepare new SampleRegion
+        auto region = std::make_shared<SampleRegion>();
+        region->rootNote = rootNote;
+        region->loKey = loKey;
+        region->hiKey = hiKey;
+        region->name = name;
+
+        const float sr = static_cast<float>(sampleRate_.load());
+        const float nyquist = sr * 0.5f;
+        const float baseFreq = midiNoteToHz(rootNote);
+
+        // For each band (octave), compute cutoff and lowpass
+        std::vector<float> temp(Wavetable::kWavetableSize);
+        for (int b = 0; b < kSampleBandCount; ++b) {
+            const int bandOffset = b - kSampleBandMid; // number of octaves from root
+            const int centerNote = rootNote + bandOffset * 12;
+            const float centerFreq = midiNoteToHz(centerNote);
+            const float T = (baseFreq > 1e-6f) ? (centerFreq / baseFreq) : 1.0f;
+            float cutoff = nyquist / std::max(1e-6f, T);
+            if (cutoff > nyquist) cutoff = nyquist;
+            // Apply lowpass (zero-phase approx)
+            lowpassTable(baseTable.data(), temp.data(), Wavetable::kWavetableSize, cutoff);
+            region->bandTables[b].assign(temp.begin(), temp.end());
+        }
+
+        // Atomically replace samples list: copy then push_back and swap
+        auto newList = std::make_shared<SampleList>(*samplesList_);
+        newList->push_back(region);
+        std::atomic_store_explicit(&samplesList_, newList, std::memory_order_release);
     }
 };
 
@@ -429,6 +574,42 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeLoadWavetableFromDirectBuffer
     if (!buf) return;
     const uint8_t *data = reinterpret_cast<const uint8_t *>(buf);
     engine->loadWavetableFromBufferPublic(data, static_cast<size_t>(size));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeRegisterSample(JNIEnv *env, jobject, jlong handle, jobject byteBuffer, jlong size, jint rootNote, jint loKey, jint hiKey, jstring name) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return;
+    if (!byteBuffer || size <= 0) return;
+    void *buf = env->GetDirectBufferAddress(byteBuffer);
+    if (!buf) return;
+    const uint8_t *data = reinterpret_cast<const uint8_t *>(buf);
+    const char *nameC = nullptr;
+    if (name != nullptr) {
+        nameC = env->GetStringUTFChars(name, nullptr);
+    }
+    engine->registerSampleFromBuffer(data, static_cast<size_t>(size), static_cast<int>(rootNote), static_cast<int>(loKey), static_cast<int>(hiKey), nameC);
+    if (nameC) env->ReleaseStringUTFChars(name, nameC);
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeGetLoadedSampleNames(JNIEnv *env, jobject, jlong handle) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return nullptr;
+    auto names = engine->getLoadedSampleNames();
+    jclass strClass = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray(static_cast<jsize>(names.size()), strClass, nullptr);
+    for (size_t i = 0; i < names.size(); ++i) {
+        env->SetObjectArrayElement(arr, static_cast<jsize>(i), env->NewStringUTF(names[i].c_str()));
+    }
+    return arr;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeUnloadSample(JNIEnv *, jobject, jlong handle, jint index) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return;
+    engine->unloadSampleByIndex(static_cast<int>(index));
 }
 
 extern "C" JNIEXPORT void JNICALL

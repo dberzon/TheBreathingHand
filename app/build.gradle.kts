@@ -38,6 +38,11 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
     buildFeatures {
         // Disable Compose to reduce build size/complexity
         compose = false
@@ -57,6 +62,7 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("com.google.oboe:oboe:1.7.0")
     implementation(project(":shared"))
+    implementation("androidx.documentfile:documentfile:1.0.1")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

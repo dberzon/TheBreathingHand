@@ -53,11 +53,39 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlay: HarmonicOverlayView
     private lateinit var mpeSwitch: Switch // The new Tick Box
 
-    // Activity result launcher for picking a single audio file (WAV)
+    // Activity result launcher for picking a single audio file (WAV) — simple custom wavetable
     private val pickWavLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { loadWavetableUri(it) }
+    }
+
+    // Activity result launcher for mapped samples (asks for mapping metadata)
+    private val pickMappedSampleLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { showMappedSampleDialog(it) }
+    }
+
+    // SFZ file picker
+    private val pickSfzLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onSfzPicked(it) }
+    }
+
+    // Pick a folder that contains sample files (OpenDocumentTree)
+    private val pickSfzFolderLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        uri?.let { onSfzFolderPicked(it) }
+    }
+
+    // Pick individual missing sample file
+    private val pickSingleSampleLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onSingleSamplePicked(it) }
     }
 
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
@@ -171,9 +199,53 @@ class MainActivity : AppCompatActivity() {
         controlsOverlay.layoutParams = controlsParams
         container.addView(controlsOverlay)
 
+        // Mapped sample picker (from controls overlay)
+        controlsOverlay.onLoadMappedSample = {
+            pickMappedSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
+        }
+
+        // SFZ importer (from controls overlay)
+        controlsOverlay.onImportSfz = {
+            pickSfzLauncher.launch(arrayOf("*/*"))
+        }
+
+        // Manage samples (from controls overlay)
+        controlsOverlay.onManageSamples = {
+            showManageSamplesDialog()
+        }
+
         // Set the container as the activity content
         setContentView(container)
     }
+
+    private fun showManageSamplesDialog() {
+        val names = internalSynth.getLoadedSampleNames()
+        if (names.isEmpty()) {
+            Toast.makeText(this, "No samples loaded", Toast.LENGTH_SHORT).show()
+            return
+        }
+        var selectedIndex = 0
+        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
+        builder.setTitle("Loaded Samples")
+        builder.setSingleChoiceItems(names, selectedIndex) { _, which ->
+            selectedIndex = which
+        }
+        builder.setPositiveButton("Unload") { _, _ ->
+            val name = names.getOrNull(selectedIndex) ?: return@setPositiveButton
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Unload Sample")
+                .setMessage("Unload '$name'? This will remove its mappings.")
+                .setPositiveButton("Yes") { _, _ ->
+                    internalSynth.unloadSample(selectedIndex)
+                    Toast.makeText(this, "Unloaded $name", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        builder.setNegativeButton("Close", null)
+        builder.show()
+    }
+
 
     /**
      * Swaps the VoiceLeader strategy without breaking the USB connection.
@@ -226,6 +298,217 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: java.io.IOException) {
             Toast.makeText(this, "Failed to load wavetable: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showMappedSampleDialog(uri: android.net.Uri) {
+        // Dialog to ask for root, lo, hi (simple numeric inputs)
+        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
+        builder.setTitle("Sample Mapping")
+        val layout = android.widget.LinearLayout(this)
+        layout.orientation = android.widget.LinearLayout.VERTICAL
+        val rootInput = android.widget.EditText(this)
+        rootInput.hint = "Root MIDI note (0..127)"
+        rootInput.setText("60")
+        val loInput = android.widget.EditText(this)
+        loInput.hint = "Low key (0..127)"
+        loInput.setText("0")
+        val hiInput = android.widget.EditText(this)
+        hiInput.hint = "High key (0..127)"
+        hiInput.setText("127")
+        layout.setPadding(24, 12, 24, 12)
+        layout.addView(rootInput)
+        layout.addView(loInput)
+        layout.addView(hiInput)
+        builder.setView(layout)
+        builder.setPositiveButton("Register") { _, _ ->
+            val root = rootInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 60
+            val lo = loInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 0
+            val hi = hiInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 127
+            // Read file and register
+            try {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    val bytes = input.readBytes()
+                    val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    bb.put(bytes)
+                    bb.rewind()
+                    internalSynth.registerSampleFromByteBuffer(bb, root, lo, hi)
+                    Toast.makeText(this, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: java.io.IOException) {
+                Toast.makeText(this, "Failed to register sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+            }
+        }
+        builder.setNegativeButton("Cancel", null)
+        builder.show()
+    }
+
+    // --- SFZ Importer helpers ---
+    data class ParsedRegion(val sampleName: String, val root: Int, val lo: Int, val hi: Int)
+
+    private var pendingSfzRegions: List<ParsedRegion>? = null
+    private var pendingSfzMissing: MutableList<String> = mutableListOf()
+    private var pendingSfzMissingIndex = 0
+
+    private fun onSfzPicked(uri: android.net.Uri) {
+        // Parse SFZ file for regions; then ask user to pick a folder containing samples
+        try {
+            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+            val regions = mutableListOf<ParsedRegion>()
+            text.lines().forEach { raw ->
+                val line = raw.trim()
+                if (line.isEmpty()) return@forEach
+                if (!line.contains("sample=")) return@forEach
+                // Tokenize by whitespace
+                val tokens = line.split(Regex("\\s+"))
+                var sampleName: String? = null
+                var lokey: Int? = null
+                var hikey: Int? = null
+                var root: Int? = null
+                for (t in tokens) {
+                    if (t.startsWith("sample=")) sampleName = t.substringAfter("=")
+                    if (t.startsWith("lokey=")) lokey = parseSfzKey(t.substringAfter("="))
+                    if (t.startsWith("hikey=")) hikey = parseSfzKey(t.substringAfter("="))
+                    if (t.startsWith("pitch_keycenter=") || t.startsWith("key=") || t.startsWith("pitch_keycenter")) {
+                        val v = t.substringAfter("=")
+                        root = parseSfzKey(v)
+                    }
+                }
+                if (sampleName != null) {
+                    val lo = lokey ?: 0
+                    val hi = hikey ?: 127
+                    val r = root ?: ((lo + hi) / 2)
+                    regions.add(ParsedRegion(sampleName, r, lo, hi))
+                }
+            }
+            if (regions.isEmpty()) {
+                Toast.makeText(this, "No regions found in SFZ", Toast.LENGTH_LONG).show()
+                return
+            }
+            pendingSfzRegions = regions
+            // Ask user to pick the folder containing samples
+            Toast.makeText(this, "Select the folder that contains SFZ sample files", Toast.LENGTH_SHORT).show()
+            pickSfzFolderLauncher.launch(null)
+        } catch (e: java.io.IOException) {
+            Toast.makeText(this, "Failed to read SFZ: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun parseSfzKey(s: String): Int? {
+        // Accept integers or note names like c4 or c-1
+        val asInt = s.toIntOrNull()
+        if (asInt != null) return asInt
+        // Parse note name
+        val m = Regex("^([A-Ga-g])([#b]?)(-?\\d+)").find(s)
+        if (m != null) {
+            val note = m.groupValues[1].uppercase()
+            val acc = m.groupValues[2]
+            val oct = m.groupValues[3].toIntOrNull() ?: return null
+            val base = when (note) {
+                "C" -> 0
+                "D" -> 2
+                "E" -> 4
+                "F" -> 5
+                "G" -> 7
+                "A" -> 9
+                "B" -> 11
+                else -> 0
+            }
+            var sem = base
+            if (acc == "#") sem += 1
+            if (acc == "b") sem -= 1
+            val midi = (oct + 1) * 12 + sem
+            return midi.coerceIn(0, 127)
+        }
+        return null
+    }
+
+    private fun onSfzFolderPicked(treeUri: android.net.Uri) {
+        fun getDisplayNameFromDoc(doc: androidx.documentfile.provider.DocumentFile?): String? {
+            if (doc == null) return null
+            return doc.name
+        }
+        val regions = pendingSfzRegions ?: return
+        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, treeUri)
+        val missing = mutableListOf<String>()
+        regions.forEach { r ->
+            val name = r.sampleName
+            var doc = tree?.findFile(name)
+            if (doc == null) {
+                // try basename (in case path included)
+                val base = name.substringAfterLast('/')
+                doc = tree?.findFile(base)
+            }
+            if (doc == null) {
+                missing.add(name)
+            } else {
+                try {
+                    contentResolver.openInputStream(doc.uri)?.use { input ->
+                        val bytes = input.readBytes()
+                        val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                        bb.put(bytes)
+                        bb.rewind()
+                        val name = getDisplayNameFromDoc(doc) ?: r.sampleName.substringAfterLast('/')
+                        internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, name)
+                    }
+                } catch (e: java.io.IOException) {
+                    missing.add(name)
+                }
+            }
+        }
+        if (missing.isEmpty()) {
+            Toast.makeText(this, "Imported ${regions.size} regions from SFZ", Toast.LENGTH_SHORT).show()
+            pendingSfzRegions = null
+            return
+        }
+        // Need user help to pick missing files
+        pendingSfzMissing = missing.toMutableList()
+        pendingSfzMissingIndex = 0
+        Toast.makeText(this, "${missing.size} files missing; please select them when prompted", Toast.LENGTH_LONG).show()
+        // Launch picker for first missing
+        pickSingleSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
+    }
+
+    private fun onSingleSamplePicked(uri: android.net.Uri) {
+        // Ensure helper for display name exists
+        fun getDisplayNameLocal(u: android.net.Uri): String? {
+            var name: String? = null
+            val cursor = contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) name = it.getString(idx)
+                }
+            }
+            return name
+        }
+        if (pendingSfzMissingIndex >= pendingSfzMissing.size) return
+        val expectedName = pendingSfzMissing[pendingSfzMissingIndex]
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                bb.put(bytes)
+                bb.rewind()
+                // Find regions referencing expectedName and register; fall back to base name
+                val regions = pendingSfzRegions ?: listOf()
+                val base = expectedName.substringAfterLast('/')
+                val name = getDisplayNameLocal(uri) ?: base
+                regions.filter { it.sampleName == expectedName || it.sampleName == base }.forEach { r ->
+                    internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, name)
+                }
+            }
+        } catch (e: java.io.IOException) {
+            Toast.makeText(this, "Failed to read selected sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+        pendingSfzMissingIndex += 1
+        if (pendingSfzMissingIndex < pendingSfzMissing.size) {
+            pickSingleSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
+        } else {
+            Toast.makeText(this, "Completed mapping missing files", Toast.LENGTH_SHORT).show()
+            pendingSfzRegions = null
+            pendingSfzMissing.clear()
+            pendingSfzMissingIndex = 0
         }
     }
 
