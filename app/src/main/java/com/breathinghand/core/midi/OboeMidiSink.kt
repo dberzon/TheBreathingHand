@@ -86,9 +86,18 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
                 0xB0 -> { // CC
                     val cc = data1
                     val value = data2
-                    // Forward CC to all voices for Standard MIDI
-                    for (i in 0 until MAX_SYNTH_VOICES) {
-                        synth.controlChange(i, cc, value)
+                    if (cc == 71) {
+                        // CC71 -> filter cutoff for all voices
+                        val vNorm = value / 127.0
+                        val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+                        for (i in 0 until MAX_SYNTH_VOICES) {
+                            synth.setFilterCutoff(i, cutoff)
+                        }
+                    } else {
+                        // Forward other CCs to all voices
+                        for (i in 0 until MAX_SYNTH_VOICES) {
+                            synth.controlChange(i, cc, value)
+                        }
                     }
                 }
                 0xE0 -> { // Pitch Bend
@@ -112,7 +121,19 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
                     synth.noteOn(synthChannel, data1, data2)
                 }
             }
-            0xB0 -> synth.controlChange(synthChannel, data1, data2)
+            0xB0 -> {
+                // CC mappings: CC71 -> Filter Cutoff (Hz), CC74 -> brightness already forwarded
+                val cc = data1
+                val value = data2
+                if (cc == 71) {
+                    // Map 0..127 -> 20Hz..12000Hz exponentially
+                    val vNorm = value / 127.0
+                    val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+                    synth.setFilterCutoff(synthChannel, cutoff)
+                } else {
+                    synth.controlChange(synthChannel, data1, data2)
+                }
+            }
             0xE0 -> {
                 val bend14 = (data2 shl 7) or data1
                 synth.pitchBend(synthChannel, bend14)

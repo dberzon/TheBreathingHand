@@ -50,6 +50,24 @@ class OboeSynthesizer {
         }
     }
 
+    fun setFilterCutoff(channel: Int, cutoffHz: Float) {
+        if (nativeHandle != 0L) {
+            nativeSetFilterCutoff(nativeHandle, channel, cutoffHz)
+        }
+    }
+
+    fun setEnvelope(channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float) {
+        if (nativeHandle != 0L) {
+            nativeSetEnvelope(nativeHandle, channel, attackMs, decayMs, sustainLevel, releaseMs)
+        }
+    }
+
+    fun setWaveform(index: Int) {
+        if (nativeHandle != 0L) {
+            nativeSetWaveform(nativeHandle, index)
+        }
+    }
+
     fun close() {
         if (nativeHandle != 0L) {
             nativeStop(nativeHandle)
@@ -67,4 +85,7 @@ class OboeSynthesizer {
     private external fun nativePitchBend(handle: Long, channel: Int, bend14: Int)
     private external fun nativeChannelPressure(handle: Long, channel: Int, pressure: Int)
     private external fun nativeControlChange(handle: Long, channel: Int, cc: Int, value: Int)
+    private external fun nativeSetFilterCutoff(handle: Long, channel: Int, cutoffHz: Float)
+    private external fun nativeSetEnvelope(handle: Long, channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float)
+    private external fun nativeSetWaveform(handle: Long, index: Int)
 }

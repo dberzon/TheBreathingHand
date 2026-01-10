@@ -89,12 +89,12 @@ class MainActivity : AppCompatActivity() {
             rangeYPx = 220f * density
         )
 
-        // --- NEW UI SETUP ---
-        setupUI()
-
         internalSynth = OboeSynthesizer()
         midiFanOut = FanOutMidiSink(OboeMidiSink(internalSynth))
         activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
+
+        // --- NEW UI SETUP ---
+        setupUI()
         updateMidiMode(mpeSwitch.isChecked)
 
         setupMidi()
@@ -144,6 +144,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         container.addView(mpeSwitch)
+
+        // Controls overlay (floating)
+        val controlsOverlay = ControlsOverlayView(this, internalSynth)
+        val controlsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        controlsParams.gravity = Gravity.BOTTOM or Gravity.END
+        controlsParams.setMargins(48, 48, 48, 48)
+        controlsOverlay.layoutParams = controlsParams
+        container.addView(controlsOverlay)
 
         // Set the container as the activity content
         setContentView(container)
