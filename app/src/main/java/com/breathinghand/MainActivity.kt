@@ -19,8 +19,9 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG_SEM = "BH_SEM"
-        // Fix: Local debug flag to bypass unresolved BuildConfig
-        private const val IS_DEBUG = true
+        // Default OFF for performance / hot-path safety.
+        // Flip to true only during short forensic sessions.
+        private const val IS_DEBUG = false
     }
 
     private val touchState = MutableTouchPolar()
@@ -64,7 +65,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // Fix: Use local constant
+        // Forensic TX must remain OFF unless explicitly enabled.
         MidiOut.FORENSIC_TX_LOG = IS_DEBUG
 
         val density = resources.displayMetrics.density
@@ -277,15 +278,23 @@ class MainActivity : AppCompatActivity() {
                 val centerYNorm =
                     if (overlay.height > 0) (touchState.centerY / overlay.height.toFloat()) else 0.5f
 
-                val changed = harmonicEngine.update(
-                    touchFrame.tMs,
-                    touchState.angle,
-                    spreadSmooth,
-                    centerYNorm,
-                    fCount,
-                    gestureAnalyzer.latchedTriad,
-                    gestureAnalyzer.latchedSeventh
-                )
+                // IMPORTANT (v0.2):
+                // On TransitionWindow hit, we must re-articulate the stored state verbatim.
+                // Do not run HarmonicEngine.update() in the same frame, or instability/spread
+                // can shift and alter harmony on the re-touch.
+                val changed = if (!transitionHit) {
+                    harmonicEngine.update(
+                        touchFrame.tMs,
+                        touchState.angle,
+                        spreadSmooth,
+                        centerYNorm,
+                        fCount,
+                        gestureAnalyzer.latchedTriad,
+                        gestureAnalyzer.latchedSeventh
+                    )
+                } else {
+                    false
+                }
 
                 if (changed && IS_DEBUG) {
                     MidiLogger.logHarmony(harmonicEngine.state)
@@ -308,7 +317,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun invalidateIfVisualChanged() {
         val s = harmonicEngine.state
-        val unstable = s.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+        val unstable = s.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD
 
         val changed =
             (s.functionSector != lastDrawnSector) ||

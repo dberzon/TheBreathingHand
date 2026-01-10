@@ -6,7 +6,7 @@ package com.breathinghand.core
  * Must never influence harmony selection.
  */
 class TransitionWindow {
-    private var armed: Boolean = false
+    private var active: Boolean = false
     private var tLiftMs: Long = 0L
     private var cx: Float = 0f
     private var cy: Float = 0f
@@ -15,7 +15,7 @@ class TransitionWindow {
     val storedState: HarmonicState = HarmonicState()
 
     fun arm(nowMs: Long, centerX: Float, centerY: Float, state: HarmonicState, lastFingerCount: Int) {
-        armed = true
+        active = true
         tLiftMs = nowMs
         cx = centerX
         cy = centerY
@@ -24,11 +24,11 @@ class TransitionWindow {
     }
 
     fun disarm() {
-        armed = false
+        active = false
     }
 
     fun consumeIfHit(nowMs: Long, centerX: Float, centerY: Float, newFingerCount: Int): Boolean {
-        if (!armed) return false
+        if (!active) return false
         val dt = nowMs - tLiftMs
         if (dt < 0L || dt > MusicalConstants.TRANSITION_WINDOW_MS) return false
         if (newFingerCount != fingerCount) return false
@@ -38,7 +38,7 @@ class TransitionWindow {
         val tol = MusicalConstants.TRANSITION_TOLERANCE_PX
         if ((dx * dx + dy * dy) > (tol * tol)) return false
 
-        armed = false
+        active = false
         return true
     }
 }

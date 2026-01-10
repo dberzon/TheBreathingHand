@@ -82,7 +82,7 @@ class VoiceLeader(private val midi: MidiOut) {
                     input.fingerCount != lastFingerCount ||
                     input.triad != lastTriad ||
                     input.seventh != lastSeventh ||
-                    (input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
+                    (input.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
 
         if (harmonicChanged) {
             lastRootPc = input.rootPc
