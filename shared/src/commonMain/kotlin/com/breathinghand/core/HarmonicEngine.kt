@@ -1,118 +1,121 @@
 package com.breathinghand.core
 
-import kotlin.math.*
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.math.min
 
-data class HarmonicState(var root: Int = 0, var quality: Int = 1, var density: Int = 3)
+/**
+ * Gesture Grammar + Harmonic Map v0.1 ("Stable Gravity Map")
+ * Allocation-free hot path.
+ */
+data class HarmonicState(
+    var root: Int = 0,        // committed sector (0..11)
+    var quality: Int = 2,     // spreadBand: 0=RED,1=GREEN,2=BLUE
+    var density: Int = 0      // fingerCount (0..4) for v0.1
+) {
+    var previewRoot: Int = 0  // sector under hand (visual only)
+    var triad: Int = GestureAnalyzerV01.TRIAD_FAN
+    var seventh: Int = GestureAnalyzerV01.SEVENTH_COMPACT
+}
 
 class HarmonicEngine(
     private val sectorCount: Int = MusicalConstants.SECTOR_COUNT,
     private val r1: Float = MusicalConstants.BASE_RADIUS_INNER,
-    private val r2: Float = MusicalConstants.BASE_RADIUS_OUTER
+    private val r2: Float = MusicalConstants.BASE_RADIUS_OUTER,
+    // Fix: Injectable Hysteresis for density scaling
+    private val hysteresis: Float = InputTuning.RADIUS_HYSTERESIS_PX
 ) {
     val state = HarmonicState()
 
-    // Internal State for Hysteresis
-    private var latchedSector = 0
-    private var latchedQuality = 1 // Start at Neutral/Blue
+    private var latchedPreviewSector = 0
+    private var committedSector = 0
+    private var latchedBand = 2 // start BLUE
 
-    // Internal State for Temporal Logic (Time Gates)
-    private var lastFingerChangeTime = 0L
-    private var stableFingerCount = 0
-    private var rawFingerCount = 0
+    var didCommitRootThisUpdate: Boolean = false
+        private set
 
-    fun update(angleRad: Float, radius: Float, currentFingerCount: Int, nowMs: Long): Boolean {
-        val now = nowMs
+    fun update(
+        angleRad: Float,
+        spreadPx: Float,
+        fingerCount: Int,
+        triadArchetype: Int,
+        seventhArchetype: Int,
+        nowMs: Long
+    ): Boolean {
+        didCommitRootThisUpdate = false
+
         val prevRoot = state.root
-        val prevQual = state.quality
-        val prevDens = state.density
+        val prevBand = state.quality
+        val prevFc = state.density
+        val prevTriad = state.triad
+        val prevSev = state.seventh
 
-        // --- 1. TEMPORAL LOGIC (The State Machine) ---
+        // 0) Finger semantics (v0.1)
+        val fc = fingerCount.coerceIn(0, 4)
+        state.density = fc
+        state.triad = if (fc >= 3) triadArchetype else GestureAnalyzerV01.TRIAD_NONE
+        state.seventh = if (fc >= 4) seventhArchetype else GestureAnalyzerV01.SEVENTH_NONE
 
-        if (currentFingerCount != rawFingerCount) {
-            // Finger count just changed. Start the timer.
-            lastFingerChangeTime = now
-            rawFingerCount = currentFingerCount
-        }
+        // 1) Preview Root
+        val twoPi = 2f * PI.toFloat()
+        var angleNorm = angleRad % twoPi
+        if (angleNorm < 0f) angleNorm += twoPi
 
-        val timeSinceChange = now - lastFingerChangeTime
-
-        // LOGIC: "The Flam" & "The Twitch" Handler
-        if (currentFingerCount > stableFingerCount) {
-            // ATTACK (Finger Count Increasing)
-            // Wait for "Assembly Window" (80ms) to ensure all fingers land
-            if (timeSinceChange >= InputTuning.CHORD_ASSEMBLY_MS) {
-                stableFingerCount = currentFingerCount
-            }
-        } else if (currentFingerCount < stableFingerCount) {
-            // RELEASE / GLITCH (Finger Count Decreasing)
-            // Wait for "Retention Window" (250ms) before accepting the drop
-            // This ignores accidental lifts ("The Twitch")
-            if (timeSinceChange >= InputTuning.CHORD_RETENTION_MS) {
-                stableFingerCount = currentFingerCount
-            }
-        }
-
-        // Clamp density for musical mapping (3 to 5 voices)
-        state.density = stableFingerCount.coerceIn(3, 5)
-
-
-        // --- 2. SPATIAL LOGIC (Hysteresis) ---
-
-        // A. Angular Latching (Root)
-        val angleNorm = (angleRad + 2 * PI).rem(2 * PI).toFloat()
-        val sectorWidth = (2 * PI / sectorCount).toFloat()
+        val sectorWidth = twoPi / sectorCount.toFloat()
         val maxIndex = sectorCount - 1
         val candidate = floor(angleNorm / sectorWidth).toInt().coerceIn(0, maxIndex)
 
-        // Use new scientific constant: 2.0 degrees
-        latchedSector = latchSector(angleNorm, latchedSector, candidate, sectorWidth)
-        state.root = latchedSector
+        latchedPreviewSector = latchSector(angleNorm, latchedPreviewSector, candidate, sectorWidth)
+        state.previewRoot = latchedPreviewSector
 
+        // 2) SpreadBand (0=RED,1=GREEN,2=BLUE) with scalable hysteresis
+        val hys = hysteresis
 
-        // B. Radial Hysteresis (Quality)
-        // Use new scientific constant: 100px buffer
-        // Logic: Only switch if we cross the threshold +/- buffer
-        val hys = InputTuning.RADIUS_HYSTERESIS_PX
-
-        // Define Thresholds
-        val minorThresh = r1  // Boundary between Red/Blue
-        val majorThresh = r2  // Boundary between Blue/Green
-
-        if (latchedQuality == 0) { // Currently RED
-            if (radius > minorThresh + hys) latchedQuality = 1
-        } else if (latchedQuality == 1) { // Currently BLUE
-            if (radius < minorThresh - hys) latchedQuality = 0
-            else if (radius > majorThresh + hys) latchedQuality = 2
-        } else { // Currently GREEN
-            if (radius < majorThresh - hys) latchedQuality = 1
+        if (latchedBand == 0) { // RED
+            if (spreadPx > r1 + hys) latchedBand = 1
+        } else if (latchedBand == 1) { // GREEN
+            if (spreadPx < r1 - hys) latchedBand = 0
+            else if (spreadPx > r2 + hys) latchedBand = 2
+        } else { // BLUE
+            if (spreadPx < r2 - hys) latchedBand = 1
         }
 
-        state.quality = latchedQuality
+        state.quality = latchedBand
 
-        // Return TRUE only if the "Musical State" changed (Input -> Audio)
-        return (state.root != prevRoot) || (state.quality != prevQual) || (state.density != prevDens)
+        // 3) Root COMMIT policy: only in RED clutch
+        if (latchedBand == 0 && committedSector != latchedPreviewSector) {
+            committedSector = latchedPreviewSector
+            didCommitRootThisUpdate = true
+        }
+        state.root = committedSector
+
+        return (state.root != prevRoot) ||
+                (state.quality != prevBand) ||
+                (state.density != prevFc) ||
+                (state.triad != prevTriad) ||
+                (state.seventh != prevSev)
     }
 
     private fun latchSector(angleNorm: Float, current: Int, candidate: Int, sectorWidth: Float): Int {
         if (candidate == current) return current
 
         val halfWidth = sectorWidth * 0.5f
-
-        // Use Scientific Constant
-        val requestedMargin = Math.toRadians(InputTuning.ANGLE_HYSTERESIS_DEG.toDouble()).toFloat()
+        val requestedMargin = InputTuning.ANGLE_HYSTERESIS_DEG * (PI.toFloat() / 180f)
         val margin = min(requestedMargin, halfWidth - 0.0001f)
 
-        // Wrap-around distance logic
         val candCenter = (candidate + 0.5f) * sectorWidth
+
         var dist = abs(angleNorm - candCenter)
-        if (dist > PI.toFloat()) dist = (2 * PI).toFloat() - dist
+        val pi = PI.toFloat()
+        if (dist > pi) dist = (2f * pi) - dist
 
         return if (dist <= (halfWidth - margin)) candidate else current
     }
 
-    fun getCurrentColor(): Int = when(state.quality) {
-        0 -> -65536 // Red
-        1 -> -16776961 // Blue
-        else -> -16711936 // Green
+    fun getCurrentColor(): Int = when (state.quality) {
+        0 -> -65536      // RED
+        1 -> -16711936   // GREEN
+        else -> -16776961 // BLUE
     }
 }

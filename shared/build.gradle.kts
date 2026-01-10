@@ -11,7 +11,7 @@ kotlin {
     // See: https://kotlinlang.org/docs/multiplatform-discover-project.html#targets
     androidLibrary {
         namespace = "com.breathinghand.shared"
-        compileSdk = 36
+        compileSdk = 34
         minSdk = 24
 
         withHostTestBuilder {

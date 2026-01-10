@@ -32,6 +32,16 @@ class TimbreNavigator(
     }
 
     /**
+     * Clear all tracked origins. Call on pause/reset to prevent stale state.
+     */
+    fun resetAll() {
+        for (i in 0 until maxPointerId) {
+            originX[i] = Float.NaN
+            originY[i] = Float.NaN
+        }
+    }
+
+    /**
      * Computes gesture data into the provided MutableGesture.
      * Returns true if a valid gesture was computed (origin exists), false otherwise.
      */
@@ -50,9 +60,12 @@ class TimbreNavigator(
         var dx = x - ox
         var dy = y - oy
 
-        if (abs(dx) < deadzonePx) dx = 0f
-        if (abs(dy) < deadzonePx) dy = 0f
-
+        // Circular deadzone (instead of square) for consistent feel in all directions
+        val rawDist = sqrt(dx * dx + dy * dy)
+        if (rawDist < deadzonePx) {
+            dx = 0f
+            dy = 0f
+        }
         val dxNorm = (dx / rangeXPx).coerceIn(-1f, 1f)
         val dyNorm = (dy / rangeYPx).coerceIn(-1f, 1f)
 

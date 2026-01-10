@@ -6,7 +6,10 @@ import com.breathinghand.core.HarmonicState
 
 object MidiLogger {
     private const val TAG = "FORENSIC_DATA"
-    private const val ENABLED = true // <-- flip to false to disable logging
+    // Fix: Local constant to bypass unresolved BuildConfig
+    private const val IS_DEBUG = true
+
+    private val ENABLED = IS_DEBUG
 
     fun logCommit(state: HarmonicState) {
         if (!ENABLED) return

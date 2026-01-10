@@ -7,7 +7,10 @@ import kotlin.math.max
 
 object TouchLogger {
     private const val TAG = "FORENSIC_DATA"
-    private const val ENABLED = true // <-- flip to false to disable logging
+    // Fix: Local constant to bypass unresolved BuildConfig
+    private const val IS_DEBUG = true
+
+    private val ENABLED = IS_DEBUG
     private var lastMoveLogMs: Long = 0L
 
     fun log(
@@ -64,6 +67,7 @@ object TouchLogger {
             val xNorm = x / w.toFloat()
             val yNorm = y / h.toFloat()
 
+            // String.format allocates, but this is gated by ENABLED so it's safe for Prod
             val line = String.format(
                 Locale.US,
                 "%d,TOUCH_RAW,%s,%d,%d,%.2f,%.2f,%.5f,%.5f,%.4f,%.4f,%d",

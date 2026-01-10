@@ -111,13 +111,11 @@ class SmartInputHAL(
     )
 
     companion object {
-        const val INVALID_ID = -1
+        // Use TouchFrame.INVALID_ID to avoid duplication
+        const val INVALID_ID = TouchFrame.INVALID_ID
 
-        // Flags
-        const val F_DOWN = 1 shl 0
-        const val F_UP = 1 shl 1
-        const val F_WACK = 1 shl 2
-        const val F_PRIMARY = 1 shl 3
+        // Use TouchFrame flag constants to avoid duplication
+        // TouchFrame.F_DOWN, TouchFrame.F_UP, TouchFrame.F_WACK, TouchFrame.F_PRIMARY
 
         private inline fun clamp01(v: Float): Float = when {
             v < 0f -> 0f
@@ -172,9 +170,9 @@ class SmartInputHAL(
                         (lastActionMasked == MotionEvent.ACTION_CANCEL)
 
             if (isDownForThisPointer) {
-                flags[slot] = flags[slot] or F_DOWN
+                flags[slot] = flags[slot] or TouchFrame.F_DOWN
                 lastDownTms[slot] = now
-                // reset smoothing memory for fast attack
+                // Reset smoothing memory for fast attack
                 smoothedForce[slot] = 0f
                 lastX[slot] = px
                 lastY[slot] = py
@@ -182,7 +180,7 @@ class SmartInputHAL(
                 lastSize[slot] = s
             }
             if (isUpForThisPointer) {
-                flags[slot] = flags[slot] or F_UP
+                flags[slot] = flags[slot] or TouchFrame.F_UP
             }
 
             // Compute raw force (0..1) by mode
@@ -212,12 +210,12 @@ class SmartInputHAL(
             // Wack detection: within early window after down, if size spike + motion spike
             if (!isUpForThisPointer) {
                 if (detectWack(slot, now, px, py, s, force[slot])) {
-                    flags[slot] = flags[slot] or F_WACK
+                    flags[slot] = flags[slot] or TouchFrame.F_WACK
                 }
             }
 
             // Primary flag (slot 0 is often “primary” in strict slotting, but don’t assume)
-            if (slot == 0) flags[slot] = flags[slot] or F_PRIMARY
+            if (slot == 0) flags[slot] = flags[slot] or TouchFrame.F_PRIMARY
 
             // Update motion trackers
             lastX[slot] = px
@@ -351,7 +349,8 @@ class SmartInputHAL(
                 smoothedForce[s] = 0f
                 rawPressure[s] = 0f
                 rawSize[s] = 0f
-                flags[s] = 0
+                // Don't clear flags here - F_UP must survive until MainActivity reads frame
+                // Flags are cleared at the start of next ingest() call anyway
                 return
             }
         }

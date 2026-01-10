@@ -4,40 +4,42 @@ import kotlin.math.PI
 import kotlin.math.abs
 
 class OneEuroFilter(
-    // UPDATED DEFAULTS based on Chapter 3C
     private val minCutoff: Float = InputTuning.FILTER_MIN_CUTOFF,
     private val beta: Float = InputTuning.FILTER_BETA,
     private val dCutoff: Float = 1.0f
 ) {
-    // ... (Rest of the file remains exactly the same) ...
-    private var xPrev: Float? = null
-    private var dxPrev: Float? = null
-    private var tPrev: Float? = null
+    // Zero-allocation: no boxed Floats in the hot path.
+    private var hasPrev = false
+    private var xPrev = 0f
+    private var dxPrev = 0f
+    private var tPrev = 0f
 
     fun reset() {
-        xPrev = null
-        dxPrev = null
-        tPrev = null
+        hasPrev = false
+        xPrev = 0f
+        dxPrev = 0f
+        tPrev = 0f
     }
 
     fun filter(x: Float, t: Float): Float {
-        if (tPrev == null) {
+        if (!hasPrev) {
+            hasPrev = true
             tPrev = t
             xPrev = x
             dxPrev = 0f
             return x
         }
 
-        val dt = t - tPrev!!
-        if (dt <= 0f) return xPrev!!
+        val dt = t - tPrev
+        if (dt <= 0f) return xPrev
 
         val alphaD = smoothingFactor(dt, dCutoff)
-        val dx = (x - xPrev!!) / dt
-        val dxHat = exponentialSmoothing(alphaD, dx, dxPrev!!)
+        val dx = (x - xPrev) / dt
+        val dxHat = exponentialSmoothing(alphaD, dx, dxPrev)
 
         val cutoff = minCutoff + beta * abs(dxHat)
         val alpha = smoothingFactor(dt, cutoff)
-        val xHat = exponentialSmoothing(alpha, x, xPrev!!)
+        val xHat = exponentialSmoothing(alpha, x, xPrev)
 
         xPrev = xHat
         dxPrev = dxHat

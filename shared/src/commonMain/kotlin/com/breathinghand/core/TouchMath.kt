@@ -3,6 +3,14 @@ package com.breathinghand.core
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
+/**
+ * Platform-agnostic geometry extraction from TouchFrame.
+ *
+ * NOTE: Single-finger radius uses distance from screen center,
+ * while multi-finger uses average spread from centroid × multiplier.
+ * This discontinuity is intentional for different interaction modes,
+ * but may cause a jump when transitioning.
+ */
 object TouchMath {
     fun reset() {
         // No-op: TouchMath is stateless. Kept for lifecycle symmetry.
@@ -22,6 +30,11 @@ object TouchMath {
 
         if (n == 0) {
             outResult.isActive = false
+            // --- FIX START: Clean State ---
+            outResult.pointerCount = 0
+            outResult.radius = 0f
+            outResult.angle = 0f
+            // --- FIX END ---
             return
         }
 
