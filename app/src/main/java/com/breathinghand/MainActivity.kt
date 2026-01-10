@@ -334,7 +334,15 @@ class MainActivity : AppCompatActivity() {
                         if (port != null) {
                             val sink = AndroidMidiSink(port)
                             val midi = MidiOut(sink, AndroidMonotonicClock, AndroidForensicLogger)
-                            voiceLeader = VoiceLeader(midi)
+                            
+                            // MODE SELECTION:
+                            // Set useMpe = true for original behavior (channel per finger)
+                            // Set useMpe = false for Standard MIDI (all on Ch 1, suitable for internal synth)
+                            val useMpe = false 
+                            
+                            val output: MidiOutput = if (useMpe) MpeMidiOutput(midi) else StandardMidiOutput(midi)
+                            
+                            voiceLeader = VoiceLeader(output)
                             runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
                         } else {
                             Log.w("MIDI", "Failed to open input port")

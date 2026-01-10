@@ -157,13 +157,13 @@ Long-session stability test (>1h)
 
 Define visual feedback role (decorative vs informational)
 
+Implement internal audio synthesis with Oboe (low-latency)
+
 8. Explicitly Out of Scope (For Now)
 
 UI polish / animations
 
 Presets
-
-Internal audio synthesis
 
 Network / OSC / Bluetooth
 

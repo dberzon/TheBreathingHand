@@ -1,7 +1,5 @@
 package com.breathinghand.core
 
-import com.breathinghand.core.midi.MidiOut
-
 /**
  * Slot-stable MPE voice (slot index == voice index).
  * PointerId binding is absolute: slot i is always MIDI channel (i+1).
@@ -24,7 +22,7 @@ private data class VoiceSlot(
     var pointerId: Int = TouchFrame.INVALID_ID
 )
 
-class VoiceLeader(private val midi: MidiOut) {
+class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
 
     // Slot index == voice index. Channel is fixed per slot for "sticky" MPE behavior.
     private val voices = Array(MusicalConstants.MAX_VOICES) { i -> VoiceSlot(channel = i + 1) }
@@ -156,7 +154,7 @@ class VoiceLeader(private val midi: MidiOut) {
             val v = pendingAftertouch[i]
             if (v == lastSentAftertouch[i]) continue
             lastSentAftertouch[i] = v
-            midi.sendChannelPressure(voices[i].channel, v)
+            output.channelPressure(i, v) // CHANGED
         }
     }
 
@@ -165,7 +163,7 @@ class VoiceLeader(private val midi: MidiOut) {
             val v = pendingPitchBend[i]
             if (v == lastSentPitchBend[i]) continue
             lastSentPitchBend[i] = v
-            midi.sendPitchBend(voices[i].channel, v)
+            output.pitchBend(i, v) // CHANGED
         }
     }
 
@@ -174,7 +172,7 @@ class VoiceLeader(private val midi: MidiOut) {
             val v = pendingCC74[i]
             if (v == lastSentCC74[i]) continue
             lastSentCC74[i] = v
-            midi.sendCC(voices[i].channel, 74, v)
+            output.cc(i, 74, v) // CHANGED
         }
     }
 
@@ -308,7 +306,7 @@ class VoiceLeader(private val midi: MidiOut) {
             if (wantPid == TouchFrame.INVALID_ID) {
                 // Slot empty -> release and clear binding.
                 if (v.active) {
-                    midi.sendNoteOff(v.channel, v.note)
+                    output.noteOff(slot, v.note) // CHANGED
                     v.active = false
                     v.note = 0
                 }
@@ -325,7 +323,7 @@ class VoiceLeader(private val midi: MidiOut) {
             if (havePid != wantPid) {
                 // Different pointer landed in this slot -> deterministic rebind.
                 if (v.active) {
-                    midi.sendNoteOff(v.channel, v.note)
+                    output.noteOff(slot, v.note) // CHANGED
                     v.active = false
                     v.note = 0
                 }
@@ -347,7 +345,7 @@ class VoiceLeader(private val midi: MidiOut) {
             val target = targetNotes[slot]
             if (target == 0) {
                 if (v.active) {
-                    midi.sendNoteOff(v.channel, v.note)
+                    output.noteOff(slot, v.note) // CHANGED
                     v.active = false
                     v.note = 0
                 }
@@ -362,12 +360,12 @@ class VoiceLeader(private val midi: MidiOut) {
 
                 v.note = target
                 v.active = true
-                midi.sendNoteOn(v.channel, target, vel)
+                output.noteOn(slot, target, vel) // CHANGED
                 continue
             }
 
             if (v.note != target) {
-                midi.sendNoteOff(v.channel, v.note)
+                output.noteOff(slot, v.note) // CHANGED
 
                 val vel = if (pid in 0 until velocityByPointerId.size)
                     velocityByPointerId[pid]
@@ -375,23 +373,19 @@ class VoiceLeader(private val midi: MidiOut) {
                     MusicalConstants.DEFAULT_VELOCITY
 
                 v.note = target
-                midi.sendNoteOn(v.channel, target, vel)
+                output.noteOn(slot, target, vel) // CHANGED
             }
         }
     }
 
     fun allNotesOff() {
+        // Delegate to output implementation for proper cleanup
+        output.allNotesOff() // CHANGED: Simplified delegation
+
         for (i in 0 until MusicalConstants.MAX_VOICES) {
             val v = voices[i]
-            if (v.active) {
-                midi.sendNoteOff(v.channel, v.note)
-            }
-
-            // Reset channel state.
-            midi.sendChannelPressure(v.channel, 0)
-            midi.sendPitchBend(v.channel, MusicalConstants.CENTER_PITCH_BEND)
-            midi.sendCC(v.channel, 74, MusicalConstants.CENTER_CC74)
-
+            // We do NOT call output.noteOff here anymore because output.allNotesOff() handles it better
+            // just reset internal state:
             v.note = 0
             v.active = false
             v.pointerId = TouchFrame.INVALID_ID
@@ -430,6 +424,6 @@ class VoiceLeader(private val midi: MidiOut) {
 
     fun close() {
         allNotesOff()
-        midi.close()
+        output.close() // CHANGED
     }
 }
