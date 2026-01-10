@@ -9,10 +9,10 @@ import com.breathinghand.core.midi.MidiOut
  * Note assignment (layer roles):
  * - Notes are assigned by ROLE (layer) and mapped to active slots.
  * - Roles are stable on finger-add, and compact on finger-remove, so:
- *   - 1 finger always becomes reference/root role (role 0)
- *   - 2 fingers => roles 0..1 (root + fifth)
- *   - 3 fingers => roles 0..2 (+ triad layer)
- *   - 4 fingers => roles 0..3 (+ seventh layer)
+ * - 1 finger always becomes reference/root role (role 0)
+ * - 2 fingers => roles 0..1 (root + fifth)
+ * - 3 fingers => roles 0..2 (+ triad layer)
+ * - 4 fingers => roles 0..3 (+ seventh layer)
  *
  * KMP-safe: no android.* imports.
  * Zero allocations in update hot path.
@@ -72,11 +72,7 @@ class VoiceLeader(private val midi: MidiOut) {
      * @param input Harmonic state (layered).
      * @param activePointerIds slot-aligned pointerIds; TouchFrame.INVALID_ID for empty slots.
      */
-    /**
-     * Primary update (safe to call every frame; no allocations).
-     */
     fun update(input: HarmonicState, activePointerIds: IntArray) {
-        // FIX: Updated property names to match Core_Data_Structures.kt
         val harmonicChanged =
             input.rootPc != lastRootPc ||
                     input.fingerCount != lastFingerCount ||
@@ -186,7 +182,7 @@ class VoiceLeader(private val midi: MidiOut) {
      * Role assignment:
      * - New fingers get the next available role (no replacement).
      * - On finger removal, roles are compacted in ascending prior-role order, so
-     *   the remaining finger(s) become roles 0..N-1.
+     * the remaining finger(s) become roles 0..N-1.
      *
      * This guarantees: 1 finger always becomes the reference/root role (role 0).
      */
