@@ -68,6 +68,13 @@ class OboeSynthesizer {
         }
     }
 
+    // Load user-supplied wavetable data from a DirectByteBuffer and pass to native layer
+    fun loadWavetableFromByteBuffer(buffer: java.nio.ByteBuffer) {
+        if (nativeHandle != 0L) {
+            nativeLoadWavetableFromDirectBuffer(nativeHandle, buffer, buffer.capacity().toLong())
+        }
+    }
+
     fun close() {
         if (nativeHandle != 0L) {
             nativeStop(nativeHandle)
@@ -88,4 +95,5 @@ class OboeSynthesizer {
     private external fun nativeSetFilterCutoff(handle: Long, channel: Int, cutoffHz: Float)
     private external fun nativeSetEnvelope(handle: Long, channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float)
     private external fun nativeSetWaveform(handle: Long, index: Int)
+    private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
 }

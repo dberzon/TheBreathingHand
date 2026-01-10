@@ -12,6 +12,7 @@ import android.widget.FrameLayout
 import android.widget.Switch
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import com.breathinghand.audio.OboeSynthesizer
 import com.breathinghand.core.*
 import com.breathinghand.core.midi.AndroidForensicLogger
@@ -51,6 +52,13 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var overlay: HarmonicOverlayView
     private lateinit var mpeSwitch: Switch // The new Tick Box
+
+    // Activity result launcher for picking a single audio file (WAV)
+    private val pickWavLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { loadWavetableUri(it) }
+    }
 
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
     private val touchDriver = AndroidTouchDriver(maxSlots = MusicalConstants.MAX_VOICES)
@@ -143,6 +151,13 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Mode: $modeName", Toast.LENGTH_SHORT).show()
         }
 
+        // Long-press the switch to pick a custom wavetable (.wav). Uses a DirectByteBuffer and hands it to native code.
+        mpeSwitch.setOnLongClickListener {
+            pickWavLauncher.launch(arrayOf("audio/wav", "audio/*"))
+            Toast.makeText(this, "Pick a .wav to load as wavetable", Toast.LENGTH_SHORT).show()
+            true
+        }
+
         container.addView(mpeSwitch)
 
         // Controls overlay (floating)
@@ -193,6 +208,24 @@ class MainActivity : AppCompatActivity() {
                 }
                 voiceLeader?.setSlotVelocity(s, pid, v)
             }
+        }
+    }
+
+    // Read content from the URI into a DirectByteBuffer and pass it to the native engine
+    private fun loadWavetableUri(uri: android.net.Uri) {
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                bb.put(bytes)
+                bb.rewind()
+
+                // Hand the DirectByteBuffer to the native side via the OboeSynthesizer wrapper
+                internalSynth.loadWavetableFromByteBuffer(bb)
+                Toast.makeText(this, "Loaded wavetable (${bytes.size} bytes)", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: java.io.IOException) {
+            Toast.makeText(this, "Failed to load wavetable: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
         }
     }
 

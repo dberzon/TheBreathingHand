@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include "Wavetable.h"
 
 namespace {
 
@@ -55,6 +56,7 @@ public:
 
     enum WaveformId { WAVE_SINE = 0, WAVE_TRIANGLE = 1, WAVE_SAW = 2, WAVE_SQUARE = 3 };
     static constexpr int kNumWavetables = 4;
+    static constexpr int WAVE_CUSTOM_ID = 100;
 
     OboeSynthEngine() {
         generateWavetables();
@@ -119,6 +121,11 @@ public:
     void setWaveform(int index) {
         if (index < 0 || index >= kNumWavetables) return;
         activeWaveformId_.store(index);
+    }
+
+    // Public wrapper for loading wavetable data (calls private loader)
+    void loadWavetableFromBufferPublic(const uint8_t *data, size_t size) {
+        loadWavetableFromBuffer(data, size);
     }
 
     void pitchBend(int channel, int bend14) {
@@ -196,18 +203,27 @@ public:
                 // Wavetable lookup (linear interpolation)
                 // Choose table based on active waveform and note number (per-MIDI-note)
                 int waveId = activeWaveformId_.load();
-                int note = voice.noteNumber.load();
-                if (note < 0 || note >= kNumNotes) note = 69; // default to A4 if unknown
-                const float* table = tablePtrs_[waveId][note];
                 float tableSample = 0.0f;
-                if (table) {
-                    const float idx = voice.phase * static_cast<float>(kWavetableSize);
-                    int i0 = static_cast<int>(idx) % kWavetableSize;
-                    int i1 = (i0 + 1) % kWavetableSize;
-                    const float frac = idx - static_cast<float>(i0);
-                    tableSample = table[i0] * (1.0f - frac) + table[i1] * frac;
+                if (waveId == WAVE_CUSTOM_ID) {
+                    auto wav = std::atomic_load_explicit(&customWavetable_, std::memory_order_acquire);
+                    if (wav) {
+                        tableSample = wav->render(voice.phase);
+                    } else {
+                        tableSample = std::sinf(kTwoPi * voice.phase);
+                    }
                 } else {
-                    tableSample = std::sinf(kTwoPi * voice.phase);
+                    int note = voice.noteNumber.load();
+                    if (note < 0 || note >= kNumNotes) note = 69; // default to A4 if unknown
+                    const float* table = tablePtrs_[waveId][note];
+                    if (table) {
+                        const float idx = voice.phase * static_cast<float>(kWavetableSize);
+                        int i0 = static_cast<int>(idx) % kWavetableSize;
+                        int i1 = (i0 + 1) % kWavetableSize;
+                        const float frac = idx - static_cast<float>(i0);
+                        tableSample = table[i0] * (1.0f - frac) + table[i1] * frac;
+                    } else {
+                        tableSample = std::sinf(kTwoPi * voice.phase);
+                    }
                 }
                 const float aftertouch = 0.5f + 0.5f * channels_[ch].aftertouch.load();
 
@@ -365,8 +381,23 @@ private:
     std::array<std::array<const float*, kNumNotes>, kNumWavetables> tablePtrs_{};
     std::atomic<int> activeWaveformId_{0};
 
+    // Custom wavetable (loaded from user-supplied .wav)
+    std::shared_ptr<Wavetable> customWavetable_ = nullptr;
+
     std::atomic<double> sampleRate_{48000.0};
     std::atomic<bool> isPlaying_{false};
+
+    // Load a user-supplied wavetable and switch engine to use it safely
+    void setCustomWavetable(const std::shared_ptr<Wavetable> &wav) {
+        std::atomic_store_explicit(&customWavetable_, wav, std::memory_order_release);
+        activeWaveformId_.store(WAVE_CUSTOM_ID);
+    }
+
+    void loadWavetableFromBuffer(const uint8_t *data, size_t size) {
+        if (!data || size == 0) return;
+        auto wav = std::make_shared<Wavetable>(data, size);
+        setCustomWavetable(wav);
+    }
 };
 
 OboeSynthEngine *fromHandle(jlong handle) {
@@ -387,6 +418,17 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeDelete(JNIEnv *, jobject, jlo
     if (!engine) return;
     engine->close();
     delete engine;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeLoadWavetableFromDirectBuffer(JNIEnv *env, jobject, jlong handle, jobject byteBuffer, jlong size) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return;
+    if (!byteBuffer || size <= 0) return;
+    void *buf = env->GetDirectBufferAddress(byteBuffer);
+    if (!buf) return;
+    const uint8_t *data = reinterpret_cast<const uint8_t *>(buf);
+    engine->loadWavetableFromBufferPublic(data, static_cast<size_t>(size));
 }
 
 extern "C" JNIEXPORT void JNICALL
