@@ -6,7 +6,7 @@ import com.breathinghand.core.midi.MidiOut
  * Slot-stable MPE voice (slot index == voice index).
  * PointerId binding is absolute: slot i is always MIDI channel (i+1).
  *
- * Gesture Grammar v0.1 note assignment:
+ * Note assignment (layer roles):
  * - Notes are assigned by ROLE (layer) and mapped to active slots.
  * - Roles are stable on finger-add, and compact on finger-remove, so:
  *   - 1 finger always becomes reference/root role (role 0)
@@ -59,44 +59,45 @@ class VoiceLeader(private val midi: MidiOut) {
         IntArray(MusicalConstants.MAX_VOICES) { MusicalConstants.CENTER_CC74 }
     private val lastSentCC74 = IntArray(MusicalConstants.MAX_VOICES) { -1 }
 
-    // Last committed harmony (avoid depending on constructor details).
-    private var lastRoot = Int.MIN_VALUE
-    private var lastDensity = Int.MIN_VALUE
+    // Last harmony snapshot that affects mapping (keeps hot path stable).
+    private var lastRootPc = Int.MIN_VALUE
+    private var lastFingerCount = Int.MIN_VALUE
     private var lastTriad = Int.MIN_VALUE
     private var lastSeventh = Int.MIN_VALUE
+    private var lastUnstable = false
 
     /**
-     * Primary update (called on each committed harmonic tick).
+     * Primary update (safe to call every frame; no allocations).
      *
-     * @param input Harmonic state (committed root + finger semantics).
+     * @param input Harmonic state (layered).
      * @param activePointerIds slot-aligned pointerIds; TouchFrame.INVALID_ID for empty slots.
      */
+    /**
+     * Primary update (safe to call every frame; no allocations).
+     */
     fun update(input: HarmonicState, activePointerIds: IntArray) {
+        // FIX: Updated property names to match Core_Data_Structures.kt
         val harmonicChanged =
-            input.root != lastRoot ||
-                input.density != lastDensity ||
-                input.triad != lastTriad ||
-                input.seventh != lastSeventh
+            input.rootPc != lastRootPc ||
+                    input.fingerCount != lastFingerCount ||
+                    input.triad != lastTriad ||
+                    input.seventh != lastSeventh ||
+                    (input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
 
         if (harmonicChanged) {
-            lastRoot = input.root
-            lastDensity = input.density
+            lastRootPc = input.rootPc
+            lastFingerCount = input.fingerCount
             lastTriad = input.triad
             lastSeventh = input.seventh
+            lastUnstable = input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+
             HarmonicFieldMapV01.fillRoleNotes(input, roleNotes)
         }
 
         updateAllocationBySlot(activePointerIds)
-
-        // Role mapping depends on active slots. Must run every update.
         updateRolesByFingerChanges()
-
-        // Targets depend on both harmony and roles.
         updateTargetsByRole()
-
         solveAndSendBySlot()
-
-        // Continuous messages (allocation-free).
         flushContinuous()
     }
 
@@ -424,10 +425,11 @@ class VoiceLeader(private val midi: MidiOut) {
         roleNotes[2] = 0
         roleNotes[3] = 0
 
-        lastRoot = Int.MIN_VALUE
-        lastDensity = Int.MIN_VALUE
+        lastRootPc = Int.MIN_VALUE
+        lastFingerCount = Int.MIN_VALUE
         lastTriad = Int.MIN_VALUE
         lastSeventh = Int.MIN_VALUE
+        lastUnstable = false
     }
 
     fun close() {

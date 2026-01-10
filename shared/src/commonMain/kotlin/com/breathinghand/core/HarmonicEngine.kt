@@ -2,120 +2,156 @@ package com.breathinghand.core
 
 import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.floor
-import kotlin.math.min
 
-/**
- * Gesture Grammar + Harmonic Map v0.1 ("Stable Gravity Map")
- * Allocation-free hot path.
- */
-data class HarmonicState(
-    var root: Int = 0,        // committed sector (0..11)
-    var quality: Int = 2,     // spreadBand: 0=RED,1=GREEN,2=BLUE
-    var density: Int = 0      // fingerCount (0..4) for v0.1
-) {
-    var previewRoot: Int = 0  // sector under hand (visual only)
-    var triad: Int = GestureAnalyzerV01.TRIAD_FAN
-    var seventh: Int = GestureAnalyzerV01.SEVENTH_COMPACT
-}
+class HarmonicEngine {
+    // Single Source of Truth from Core_Data_Structures.kt
+    val state: HarmonicState = HarmonicState()
 
-class HarmonicEngine(
-    private val sectorCount: Int = MusicalConstants.SECTOR_COUNT,
-    private val r1: Float = MusicalConstants.BASE_RADIUS_INNER,
-    private val r2: Float = MusicalConstants.BASE_RADIUS_OUTER,
-    // Fix: Injectable Hysteresis for density scaling
-    private val hysteresis: Float = InputTuning.RADIUS_HYSTERESIS_PX
-) {
-    val state = HarmonicState()
+    private var hasTouch: Boolean = false
+    private var candidateSector: Int = 0
+    private var dwellStartMs: Long = 0L
 
-    private var latchedPreviewSector = 0
-    private var committedSector = 0
-    private var latchedBand = 2 // start BLUE
+    private var lastAngleRad: Float = 0f
+    private var lastAngleTimeMs: Long = 0L
 
-    var didCommitRootThisUpdate: Boolean = false
-        private set
+    fun onAllFingersLift(nowMs: Long) {
+        hasTouch = false
+        lastAngleTimeMs = 0L
+    }
+
+    fun beginFromRestoredState(nowMs: Long, restored: HarmonicState, angleRad: Float) {
+        state.copyFrom(restored)
+        hasTouch = true
+        candidateSector = state.functionSector
+        dwellStartMs = nowMs
+        lastAngleRad = angleRad
+        lastAngleTimeMs = 0L
+    }
 
     fun update(
+        nowMs: Long,
         angleRad: Float,
         spreadPx: Float,
+        centerYNorm: Float,
         fingerCount: Int,
         triadArchetype: Int,
-        seventhArchetype: Int,
-        nowMs: Long
+        seventhArchetype: Int
     ): Boolean {
-        didCommitRootThisUpdate = false
-
-        val prevRoot = state.root
-        val prevBand = state.quality
-        val prevFc = state.density
+        val prevSector = state.functionSector
+        val prevPc = state.rootPc
+        val prevInst = state.harmonicInstability
+        val prevFc = state.fingerCount
         val prevTriad = state.triad
         val prevSev = state.seventh
 
-        // 0) Finger semantics (v0.1)
+        if (!hasTouch) {
+            val biasSector = initialBiasSector(centerYNorm)
+            state.functionSector = biasSector
+            state.rootPc = sectorToPitchClass(biasSector)
+            candidateSector = biasSector
+            dwellStartMs = nowMs
+            lastAngleTimeMs = 0L
+            hasTouch = true
+        }
+
         val fc = fingerCount.coerceIn(0, 4)
-        state.density = fc
+        state.fingerCount = fc
         state.triad = if (fc >= 3) triadArchetype else GestureAnalyzerV01.TRIAD_NONE
         state.seventh = if (fc >= 4) seventhArchetype else GestureAnalyzerV01.SEVENTH_NONE
 
-        // 1) Preview Root
-        val twoPi = 2f * PI.toFloat()
-        var angleNorm = angleRad % twoPi
-        if (angleNorm < 0f) angleNorm += twoPi
+        state.harmonicInstability = spreadToInstability(spreadPx)
 
-        val sectorWidth = twoPi / sectorCount.toFloat()
-        val maxIndex = sectorCount - 1
-        val candidate = floor(angleNorm / sectorWidth).toInt().coerceIn(0, maxIndex)
+        val rawSector = quantizeAngleToSector(angleRad)
+        val hysteresisSector = applyAngularHysteresis(state.functionSector, rawSector, angleRad)
 
-        latchedPreviewSector = latchSector(angleNorm, latchedPreviewSector, candidate, sectorWidth)
-        state.previewRoot = latchedPreviewSector
-
-        // 2) SpreadBand (0=RED,1=GREEN,2=BLUE) with scalable hysteresis
-        val hys = hysteresis
-
-        if (latchedBand == 0) { // RED
-            if (spreadPx > r1 + hys) latchedBand = 1
-        } else if (latchedBand == 1) { // GREEN
-            if (spreadPx < r1 - hys) latchedBand = 0
-            else if (spreadPx > r2 + hys) latchedBand = 2
-        } else { // BLUE
-            if (spreadPx < r2 - hys) latchedBand = 1
+        if (hysteresisSector != candidateSector) {
+            candidateSector = hysteresisSector
+            dwellStartMs = nowMs
         }
 
-        state.quality = latchedBand
+        val angVel = computeAngularVelocity(nowMs, angleRad)
+        val dwellMs = nowMs - dwellStartMs
+        val shouldAdvance =
+            dwellMs >= MusicalConstants.DWELL_THRESHOLD_MS ||
+                    abs(angVel) >= MusicalConstants.ANGULAR_SNAP_THRESHOLD_RAD_PER_SEC
 
-        // 3) Root COMMIT policy: only in RED clutch
-        if (latchedBand == 0 && committedSector != latchedPreviewSector) {
-            committedSector = latchedPreviewSector
-            didCommitRootThisUpdate = true
+        if (shouldAdvance && candidateSector != state.functionSector) {
+            state.functionSector = candidateSector
+            state.rootPc = sectorToPitchClass(candidateSector)
         }
-        state.root = committedSector
 
-        return (state.root != prevRoot) ||
-                (state.quality != prevBand) ||
-                (state.density != prevFc) ||
-                (state.triad != prevTriad) ||
-                (state.seventh != prevSev)
+        return prevSector != state.functionSector ||
+                prevPc != state.rootPc ||
+                prevInst != state.harmonicInstability ||
+                prevFc != state.fingerCount ||
+                prevTriad != state.triad ||
+                prevSev != state.seventh
     }
 
-    private fun latchSector(angleNorm: Float, current: Int, candidate: Int, sectorWidth: Float): Int {
-        if (candidate == current) return current
+    private fun computeAngularVelocity(nowMs: Long, angleRad: Float): Float {
+        val t0 = lastAngleTimeMs
+        lastAngleTimeMs = nowMs
+        val a0 = lastAngleRad
+        lastAngleRad = angleRad
 
-        val halfWidth = sectorWidth * 0.5f
-        val requestedMargin = InputTuning.ANGLE_HYSTERESIS_DEG * (PI.toFloat() / 180f)
-        val margin = min(requestedMargin, halfWidth - 0.0001f)
+        if (t0 == 0L) return 0f
+        val dt = (nowMs - t0).toFloat() / 1000f
+        if (dt <= 0f) return 0f
 
-        val candCenter = (candidate + 0.5f) * sectorWidth
+        val da = shortestAngleDelta(a0, angleRad)
+        return da / dt
+    }
 
-        var dist = abs(angleNorm - candCenter)
+    private fun shortestAngleDelta(a0: Float, a1: Float): Float {
+        var d = a1 - a0
+        val twoPi = (2.0 * PI).toFloat()
         val pi = PI.toFloat()
-        if (dist > pi) dist = (2f * pi) - dist
-
-        return if (dist <= (halfWidth - margin)) candidate else current
+        while (d > pi) d -= twoPi
+        while (d < -pi) d += twoPi
+        return d
     }
 
-    fun getCurrentColor(): Int = when (state.quality) {
-        0 -> -65536      // RED
-        1 -> -16711936   // GREEN
-        else -> -16776961 // BLUE
+    private fun quantizeAngleToSector(angleRad: Float): Int {
+        val twoPi = (2.0 * PI).toFloat()
+        var a = angleRad % twoPi
+        if (a < 0f) a += twoPi
+
+        val sectorFloat = a / twoPi * 12f
+        var s = sectorFloat.toInt()
+        if (s < 0) s = 0
+        if (s > 11) s = 11
+        return s
+    }
+
+    private fun applyAngularHysteresis(currentSector: Int, rawSector: Int, angleRad: Float): Int {
+        if (rawSector == currentSector) return rawSector
+
+        val margin = MusicalConstants.SECTOR_HYSTERESIS_RAD
+        val twoPi = (2.0 * PI).toFloat()
+        val sectorWidth = twoPi / 12f
+
+        val rawCenter = (rawSector + 0.5f) * sectorWidth
+        val delta = abs(shortestAngleDelta(rawCenter, angleRad))
+        return if (delta < (sectorWidth * 0.5f - margin)) rawSector else currentSector
+    }
+
+    private fun sectorToPitchClass(sector: Int): Int {
+        return (sector * 7) % 12
+    }
+
+    private fun spreadToInstability(spreadPx: Float): Float {
+        val min = MusicalConstants.SPREAD_MIN_PX
+        val max = MusicalConstants.SPREAD_MAX_PX
+        if (max <= min) return 0f
+        val t = ((spreadPx - min) / (max - min)).coerceIn(0f, 1f)
+        return 1f - t
+    }
+
+    private fun initialBiasSector(centerYNorm: Float): Int {
+        return when {
+            centerYNorm < MusicalConstants.BIAS_UPPER_CUTOFF_NORM -> MusicalConstants.BIAS_SECTOR_UPPER
+            centerYNorm > MusicalConstants.BIAS_LOWER_CUTOFF_NORM -> MusicalConstants.BIAS_SECTOR_LOWER
+            else -> MusicalConstants.BIAS_SECTOR_CENTER
+        }
     }
 }

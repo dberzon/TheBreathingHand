@@ -11,10 +11,10 @@ object MidiLogger {
 
     private val ENABLED = IS_DEBUG
 
-    fun logCommit(state: HarmonicState) {
+    fun logHarmony(state: HarmonicState) {
         if (!ENABLED) return
         val tMs = SystemClock.uptimeMillis()
-        Log.d(TAG, "$tMs,MIDI_COMMIT,${state.root},${state.quality},${state.density}")
+        Log.d(TAG, "$tMs,HARMONY,sector=${state.functionSector},pc=${state.rootPc},fc=${state.fingerCount}")
     }
 
     fun logAllNotesOff(reason: String) {

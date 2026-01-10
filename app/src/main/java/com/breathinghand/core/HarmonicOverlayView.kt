@@ -18,22 +18,17 @@ class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) 
         alpha = 50
     }
 
-    private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        strokeWidth = 4f
-        style = Paint.Style.STROKE
-        alpha = 120
-    }
-
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val cx = width / 2f
         val cy = height / 2f
         val r = min(width, height) * 0.4f
 
-        val color = engine.getCurrentColor()
+        val s = engine.state
+        val unstable = s.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+        val color = if (unstable) -65536 else -16776961
         paint.color = color
         fillPaint.color = color
-        previewPaint.color = color
 
         // 1) Breathing Circle
         canvas.drawCircle(cx, cy, r, paint)
@@ -52,20 +47,8 @@ class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) 
             )
         }
 
-        // 3) Preview root indicator (thin)
-        val s = engine.state
-        if (s.previewRoot != s.root) {
-            val previewAngle = (s.previewRoot + 0.5) * sectorRad
-            canvas.drawLine(
-                cx, cy,
-                cx + r * sin(previewAngle).toFloat(),
-                cy - r * cos(previewAngle).toFloat(),
-                previewPaint
-            )
-        }
-
-        // 4) Committed root indicator (thick)
-        val activeAngle = (s.root + 0.5) * sectorRad
+        // 3) Active functional sector indicator (thick)
+        val activeAngle = (s.functionSector + 0.5) * sectorRad
         paint.strokeWidth = 12f
         canvas.drawLine(
             cx, cy,

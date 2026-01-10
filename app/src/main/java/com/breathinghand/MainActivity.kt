@@ -2,8 +2,8 @@ package com.breathinghand
 
 import android.media.midi.MidiManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
-import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Toast
@@ -19,7 +19,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG_SEM = "BH_SEM"
-        private const val TAG_COMMIT = "BH_COMMIT"
         // Fix: Local debug flag to bypass unresolved BuildConfig
         private const val IS_DEBUG = true
     }
@@ -30,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var harmonicEngine: HarmonicEngine
     private lateinit var gestureAnalyzer: GestureAnalyzerV01
     private lateinit var timbreNav: TimbreNavigator
+    private val transitionWindow = TransitionWindow()
 
     private var r1Px: Float = 0f
     private var r2Px: Float = 0f
@@ -37,13 +37,6 @@ class MainActivity : AppCompatActivity() {
 
     private var voiceLeader: VoiceLeader? = null
     private lateinit var overlay: HarmonicOverlayView
-
-    private val choreographer: Choreographer by lazy { Choreographer.getInstance() }
-    private val pendingState = HarmonicState()
-    private var pendingDirty = false
-    private var pendingRelease = false
-    private var pendingReleaseReason: String = ""
-    private var frameArmed = false
 
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
     private val touchDriver = AndroidTouchDriver(maxSlots = MusicalConstants.MAX_VOICES)
@@ -53,39 +46,19 @@ class MainActivity : AppCompatActivity() {
     private val gestureContainer = TimbreNavigator.MutableGesture()
     private var lastPointerCount = 0
 
+    // Last non-zero centroid (used to arm Transition Window on lift-to-zero)
+    private var lastActiveCenterX = 0f
+    private var lastActiveCenterY = 0f
+
     // Fix: Zero-allocation initialization (removed redundant lambda)
     private val lastDyNormBySlot = FloatArray(MusicalConstants.MAX_VOICES)
     private val lastDistNormBySlot = FloatArray(MusicalConstants.MAX_VOICES)
 
-    private var lastDrawnRoot = -1
-    private var lastDrawnPreviewRoot = -1
-    private var lastDrawnQuality = -1
-    private var lastDrawnDensity = -1
-
-    private val frameCallback = Choreographer.FrameCallback {
-        frameArmed = false
-
-        // Capture state BEFORE clearing pendingDirty
-        val stateToUse = if (pendingDirty) pendingState else harmonicEngine.state
-
-        if (pendingDirty) {
-            MidiLogger.logCommit(pendingState)
-            pendingDirty = false
-        }
-
-        // Update VoiceLeader with correct state (flushContinuous is called inside update)
-        voiceLeader?.update(stateToUse, activePointers)
-
-        if (pendingRelease) {
-            MidiLogger.logAllNotesOff("FRAME_LATCH_RELEASE:$pendingReleaseReason")
-            voiceLeader?.allNotesOff()
-            pendingRelease = false
-            pendingReleaseReason = ""
-            TouchMath.reset()
-            radiusFilter.reset()
-            lastPointerCount = 0
-        }
-    }
+    // Visual change detection (v0.2)
+    private var lastDrawnSector = -1
+    private var lastDrawnPc = -1
+    private var lastDrawnFc = -1
+    private var lastDrawnUnstable = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,13 +73,8 @@ class MainActivity : AppCompatActivity() {
 
         gestureAnalyzer = GestureAnalyzerV01(r1Px, r2Px)
 
-        // Note: Ensure HarmonicEngine.kt is updated to accept 'hysteresis'
-        harmonicEngine = HarmonicEngine(
-            sectorCount = MusicalConstants.SECTOR_COUNT,
-            r1 = r1Px,
-            r2 = r2Px,
-            hysteresis = InputTuning.RADIUS_HYSTERESIS_PX * density
-        )
+        // v0.2 engine is parameterless (geometry comes from TouchMath / UI)
+        harmonicEngine = HarmonicEngine()
 
         timbreNav = TimbreNavigator(
             maxPointerId = MusicalConstants.MAX_POINTER_ID,
@@ -147,15 +115,47 @@ class MainActivity : AppCompatActivity() {
 
             val fCount = touchState.pointerCount.coerceIn(0, 4)
 
-            // Semantic Event Detection
-            val semanticEvent = when {
-                lastPointerCount == 0 && fCount > 0 -> GestureAnalyzerV01.EVENT_LANDING
-                fCount > lastPointerCount -> GestureAnalyzerV01.EVENT_ADD_FINGER
+            if (fCount > 0) {
+                lastActiveCenterX = touchState.centerX
+                lastActiveCenterY = touchState.centerY
+            }
+
+            val landing = (lastPointerCount == 0 && fCount > 0)
+            val addFinger = (fCount > lastPointerCount)
+            val liftToZero = (fCount == 0 && lastPointerCount > 0)
+
+            // Semantic event detection (meaning only; time-based logic is elsewhere)
+            var semanticEvent = when {
+                landing -> GestureAnalyzerV01.EVENT_LANDING
+                addFinger -> GestureAnalyzerV01.EVENT_ADD_FINGER
                 else -> GestureAnalyzerV01.EVENT_NONE
+            }
+
+            // Transition Window: rhythmic-only re-articulation on rapid lift -> re-touch
+            var transitionHit = false
+            if (landing) {
+                transitionHit = transitionWindow.consumeIfHit(
+                    touchFrame.tMs,
+                    touchState.centerX,
+                    touchState.centerY,
+                    fCount
+                )
+                if (transitionHit) {
+                    harmonicEngine.beginFromRestoredState(
+                        touchFrame.tMs,
+                        transitionWindow.storedState,
+                        touchState.angle
+                    )
+                    gestureAnalyzer.seedFromState(transitionWindow.storedState)
+                    semanticEvent = GestureAnalyzerV01.EVENT_NONE
+                } else {
+                    transitionWindow.disarm()
+                }
             }
 
             latchAttackVelocitiesFromFrame()
 
+            // Pointer down/up bookkeeping for timbre nav
             for (s in 0 until MusicalConstants.MAX_VOICES) {
                 val pid = touchFrame.pointerIds[s]
                 if (pid == TouchFrame.INVALID_ID) continue
@@ -168,29 +168,51 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            if (pendingRelease && isTouchActivity(event)) {
-                pendingRelease = false
-                pendingReleaseReason = ""
-                if (!pendingDirty) cancelFrameCallbackIfIdle()
-            }
-
             when (event.actionMasked) {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    // Clear active pointers to prevent stale state in frame callback
+                    // Arm Transition Window using last stable center + last finger count
+                    if (lastPointerCount > 0) {
+                        transitionWindow.arm(
+                            touchFrame.tMs,
+                            lastActiveCenterX,
+                            lastActiveCenterY,
+                            harmonicEngine.state,
+                            lastPointerCount
+                        )
+                    }
+
+                    // Clear active pointers
                     for (s in 0 until MusicalConstants.MAX_VOICES) {
                         activePointers[s] = -1
                         lastDyNormBySlot[s] = 0f
                         lastDistNormBySlot[s] = 0f
                     }
-                    pendingDirty = false
-                    pendingRelease = true
-                    pendingReleaseReason =
+
+                    MidiLogger.logAllNotesOff(
                         if (event.actionMasked == MotionEvent.ACTION_UP) "ACTION_UP" else "ACTION_CANCEL"
-                    armFrameCallback()
+                    )
+                    voiceLeader?.allNotesOff()
+
+                    harmonicEngine.onAllFingersLift(touchFrame.tMs)
+                    TouchMath.reset()
+                    radiusFilter.reset()
+                    lastPointerCount = 0
 
                     invalidateIfVisualChanged()
                     return true
                 }
+            }
+
+            // If we detect lift-to-zero without ACTION_UP (edge case), arm the window here too.
+            if (liftToZero) {
+                transitionWindow.arm(
+                    touchFrame.tMs,
+                    lastActiveCenterX,
+                    lastActiveCenterY,
+                    harmonicEngine.state,
+                    lastPointerCount
+                )
+                radiusFilter.reset()
             }
 
             if (touchState.isActive) {
@@ -200,6 +222,7 @@ class MainActivity : AppCompatActivity() {
                 val expansion01 = ((spreadSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
                 touchDriver.expansion01 = expansion01
 
+                // Update active pointers array (slot-aligned)
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = touchFrame.pointerIds[s]
                     activePointers[s] = pid
@@ -209,6 +232,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                // Continuous per-slot controls (aftertouch, PB, CC74)
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = touchFrame.pointerIds[s]
                     if (pid == TouchFrame.INVALID_ID) continue
@@ -237,41 +261,38 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                gestureAnalyzer.onSemanticEvent(touchFrame, fCount, spreadSmooth, semanticEvent)
-
-                if (semanticEvent != GestureAnalyzerV01.EVENT_NONE) {
-                    val evtName = if (semanticEvent == GestureAnalyzerV01.EVENT_LANDING) "LAND" else "ADD"
-                    if (IS_DEBUG) {
-                        Log.d(
-                            TAG_SEM,
-                            "${touchFrame.tMs},$evtName,f=$fCount,triad=${gestureAnalyzer.latchedTriad},sev=${gestureAnalyzer.latchedSeventh}"
-                        )
-                    }
+                // Gesture analyzer updates semantic layers (triad/seventh)
+                if (!transitionHit) {
+                    gestureAnalyzer.onSemanticEvent(touchFrame, fCount, spreadSmooth, semanticEvent)
                 }
 
-                val changed = harmonicEngine.update(
-                    touchState.angle,
-                    spreadSmooth,
-                    fCount,
-                    gestureAnalyzer.latchedTriad,
-                    gestureAnalyzer.latchedSeventh,
-                    touchFrame.tMs
-                )
-
-                if (harmonicEngine.didCommitRootThisUpdate && IS_DEBUG) {
+                if (semanticEvent != GestureAnalyzerV01.EVENT_NONE && IS_DEBUG) {
+                    val evtName = if (semanticEvent == GestureAnalyzerV01.EVENT_LANDING) "LAND" else "ADD"
                     Log.d(
-                        TAG_COMMIT,
-                        "${touchFrame.tMs},COMMIT,root=${harmonicEngine.state.root},preview=${harmonicEngine.state.previewRoot}"
+                        TAG_SEM,
+                        "${touchFrame.tMs},$evtName,f=$fCount,triad=${gestureAnalyzer.latchedTriad},sev=${gestureAnalyzer.latchedSeventh}"
                     )
                 }
 
-                if (changed) {
-                    pendingState.setFrom(harmonicEngine.state)
-                    pendingDirty = true
-                    armFrameCallback()
-                } else {
-                    armFrameCallback()
+                val centerYNorm =
+                    if (overlay.height > 0) (touchState.centerY / overlay.height.toFloat()) else 0.5f
+
+                val changed = harmonicEngine.update(
+                    touchFrame.tMs,
+                    touchState.angle,
+                    spreadSmooth,
+                    centerYNorm,
+                    fCount,
+                    gestureAnalyzer.latchedTriad,
+                    gestureAnalyzer.latchedSeventh
+                )
+
+                if (changed && IS_DEBUG) {
+                    MidiLogger.logHarmony(harmonicEngine.state)
                 }
+
+                // No frame-latch: harmony always active, update immediately
+                voiceLeader?.update(harmonicEngine.state, activePointers)
 
                 lastPointerCount = fCount
             } else {
@@ -279,36 +300,28 @@ class MainActivity : AppCompatActivity() {
             }
 
             invalidateIfVisualChanged()
-
         } catch (e: Exception) {
             e.printStackTrace()
         }
         return true
     }
 
-    private fun HarmonicState.setFrom(src: HarmonicState) {
-        root = src.root
-        previewRoot = src.previewRoot
-        quality = src.quality
-        density = src.density
-        triad = src.triad
-        seventh = src.seventh
-    }
-
     private fun invalidateIfVisualChanged() {
         val s = harmonicEngine.state
+        val unstable = s.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+
         val changed =
-            (s.root != lastDrawnRoot) ||
-                    (s.previewRoot != lastDrawnPreviewRoot) ||
-                    (s.quality != lastDrawnQuality) ||
-                    (s.density != lastDrawnDensity)
+            (s.functionSector != lastDrawnSector) ||
+                    (s.rootPc != lastDrawnPc) ||
+                    (s.fingerCount != lastDrawnFc) ||
+                    (unstable != lastDrawnUnstable)
 
         if (changed) {
             overlay.invalidate()
-            lastDrawnRoot = s.root
-            lastDrawnPreviewRoot = s.previewRoot
-            lastDrawnQuality = s.quality
-            lastDrawnDensity = s.density
+            lastDrawnSector = s.functionSector
+            lastDrawnPc = s.rootPc
+            lastDrawnFc = s.fingerCount
+            lastDrawnUnstable = unstable
         }
     }
 
@@ -344,43 +357,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun armFrameCallback() {
-        if (!frameArmed) {
-            frameArmed = true
-            choreographer.postFrameCallback(frameCallback)
-        }
-    }
-
-    private fun cancelFrameCallbackIfIdle() {
-        if (!pendingDirty && !pendingRelease && frameArmed) {
-            choreographer.removeFrameCallback(frameCallback)
-            frameArmed = false
-        }
-    }
-
-    private fun cancelFrameCallbackHard() {
-        choreographer.removeFrameCallback(frameCallback)
-        frameArmed = false
-        pendingDirty = false
-        pendingRelease = false
-        pendingReleaseReason = ""
-    }
-
-    private fun isTouchActivity(event: MotionEvent): Boolean {
-        return when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN,
-            MotionEvent.ACTION_MOVE,
-            MotionEvent.ACTION_POINTER_DOWN,
-            MotionEvent.ACTION_POINTER_UP -> true
-            else -> false
-        }
-    }
-
     override fun onPause() {
         super.onPause()
-        cancelFrameCallbackHard()
         MidiLogger.logAllNotesOff("onPause")
         voiceLeader?.allNotesOff()
+        harmonicEngine.onAllFingersLift(SystemClock.uptimeMillis())
         TouchMath.reset()
         radiusFilter.reset()
         timbreNav.resetAll()
@@ -389,7 +370,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        cancelFrameCallbackHard()
         voiceLeader?.close()
     }
 }

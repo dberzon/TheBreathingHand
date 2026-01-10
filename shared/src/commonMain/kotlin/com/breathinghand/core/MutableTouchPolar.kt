@@ -8,6 +8,8 @@ package com.breathinghand.core
 data class MutableTouchPolar(
     var radius: Float = 0f,
     var angle: Float = 0f,
+    var centerX: Float = 0f,
+    var centerY: Float = 0f,
     var isActive: Boolean = false,
     var pointerCount: Int = 0
 )
