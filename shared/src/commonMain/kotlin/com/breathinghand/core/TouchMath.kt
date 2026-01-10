@@ -13,7 +13,8 @@ import kotlin.math.sqrt
  */
 object TouchMath {
     fun reset() {
-        // No-op: TouchMath is stateless. Kept for lifecycle symmetry.
+        // No-op: TouchMath is stateless.
+        // Kept for lifecycle symmetry.
     }
 
     /**
@@ -30,11 +31,12 @@ object TouchMath {
 
         if (n == 0) {
             outResult.isActive = false
-            // --- FIX START: Clean State ---
+            // --- Clean State ---
             outResult.pointerCount = 0
             outResult.radius = 0f
             outResult.angle = 0f
-            // --- FIX END ---
+            outResult.centerX = 0f
+            outResult.centerY = 0f
             return
         }
 
@@ -75,6 +77,9 @@ object TouchMath {
         // ROTATION FIX: atan2(dx, -dy) ensures 0 degrees is UP (12 o'clock)
         outResult.angle = atan2(dxCenter, -dyCenter)
 
+        // 4. Populate Result (CRITICAL FIX: Assign centroid)
+        outResult.centerX = handX
+        outResult.centerY = handY
         outResult.isActive = true
         outResult.pointerCount = n
     }

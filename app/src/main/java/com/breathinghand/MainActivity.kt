@@ -19,9 +19,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG_SEM = "BH_SEM"
-        // Default OFF for performance / hot-path safety.
-        // Flip to true only during short forensic sessions.
-        private const val IS_DEBUG = false
     }
 
     private val touchState = MutableTouchPolar()
@@ -36,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private var r2Px: Float = 0f
     private val startTime = System.nanoTime()
 
+    @Volatile
     private var voiceLeader: VoiceLeader? = null
     private lateinit var overlay: HarmonicOverlayView
 
@@ -51,9 +49,6 @@ class MainActivity : AppCompatActivity() {
     private var lastActiveCenterX = 0f
     private var lastActiveCenterY = 0f
 
-    // Fix: Zero-allocation initialization (removed redundant lambda)
-    private val lastDyNormBySlot = FloatArray(MusicalConstants.MAX_VOICES)
-    private val lastDistNormBySlot = FloatArray(MusicalConstants.MAX_VOICES)
 
     // Visual change detection (v0.2)
     private var lastDrawnSector = -1
@@ -66,7 +61,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Forensic TX must remain OFF unless explicitly enabled.
-        MidiOut.FORENSIC_TX_LOG = IS_DEBUG
+        MidiOut.FORENSIC_TX_LOG = MusicalConstants.IS_DEBUG
 
         val density = resources.displayMetrics.density
         r1Px = MusicalConstants.BASE_RADIUS_INNER * density
@@ -185,8 +180,6 @@ class MainActivity : AppCompatActivity() {
                     // Clear active pointers
                     for (s in 0 until MusicalConstants.MAX_VOICES) {
                         activePointers[s] = -1
-                        lastDyNormBySlot[s] = 0f
-                        lastDistNormBySlot[s] = 0f
                     }
 
                     MidiLogger.logAllNotesOff(
@@ -227,10 +220,6 @@ class MainActivity : AppCompatActivity() {
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = touchFrame.pointerIds[s]
                     activePointers[s] = pid
-                    if (pid == TouchFrame.INVALID_ID) {
-                        lastDyNormBySlot[s] = 0f
-                        lastDistNormBySlot[s] = 0f
-                    }
                 }
 
                 // Continuous per-slot controls (aftertouch, PB, CC74)
@@ -248,9 +237,6 @@ class MainActivity : AppCompatActivity() {
                         val y = event.getY(pIndex)
 
                         if (timbreNav.compute(pid, x, y, gestureContainer)) {
-                            lastDyNormBySlot[s] = gestureContainer.dyNorm
-                            lastDistNormBySlot[s] = gestureContainer.distNorm
-
                             val bend14 = (MusicalConstants.CENTER_PITCH_BEND +
                                     (gestureContainer.dxNorm * 8191f)).toInt().coerceIn(0, 16383)
                             voiceLeader?.setSlotPitchBend(s, pid, bend14)
@@ -267,7 +253,7 @@ class MainActivity : AppCompatActivity() {
                     gestureAnalyzer.onSemanticEvent(touchFrame, fCount, spreadSmooth, semanticEvent)
                 }
 
-                if (semanticEvent != GestureAnalyzerV01.EVENT_NONE && IS_DEBUG) {
+                if (semanticEvent != GestureAnalyzerV01.EVENT_NONE && MusicalConstants.IS_DEBUG) {
                     val evtName = if (semanticEvent == GestureAnalyzerV01.EVENT_LANDING) "LAND" else "ADD"
                     Log.d(
                         TAG_SEM,
@@ -296,7 +282,7 @@ class MainActivity : AppCompatActivity() {
                     false
                 }
 
-                if (changed && IS_DEBUG) {
+                if (changed && MusicalConstants.IS_DEBUG) {
                     MidiLogger.logHarmony(harmonicEngine.state)
                 }
 

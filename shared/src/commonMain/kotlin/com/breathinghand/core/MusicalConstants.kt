@@ -1,6 +1,15 @@
 package com.breathinghand.core
 
 object MusicalConstants {
+    // --- SYSTEM INTEGRITY ---
+    /**
+     * GLOBAL DEBUG FLAG.
+     * MUST be false for production/performance validation.
+     * When true, forensic logging is enabled (allocates strings).
+     */
+    const val IS_DEBUG = false
+
+
     // Music domain
     const val MIDDLE_C = 60
     const val MAX_NOTE = 96 // C7
