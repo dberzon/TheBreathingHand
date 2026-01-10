@@ -4,15 +4,21 @@ import android.media.midi.MidiManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.Switch
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.breathinghand.audio.OboeSynthesizer
 import com.breathinghand.core.*
 import com.breathinghand.core.midi.AndroidForensicLogger
 import com.breathinghand.core.midi.AndroidMonotonicClock
 import com.breathinghand.core.midi.AndroidMidiSink
+import com.breathinghand.core.midi.FanOutMidiSink
 import com.breathinghand.core.midi.MidiOut
+import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
 
 class MainActivity : AppCompatActivity() {
@@ -35,7 +41,15 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var voiceLeader: VoiceLeader? = null
+
+    // We keep a reference to the raw MIDI transport so we can swap modes without reconnecting
+    private var activeMidiOut: MidiOut? = null
+    private lateinit var internalSynth: OboeSynthesizer
+    private lateinit var midiFanOut: FanOutMidiSink
+    private var externalMidiSink: AndroidMidiSink? = null
+
     private lateinit var overlay: HarmonicOverlayView
+    private lateinit var mpeSwitch: Switch // The new Tick Box
 
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
     private val touchDriver = AndroidTouchDriver(maxSlots = MusicalConstants.MAX_VOICES)
@@ -49,8 +63,7 @@ class MainActivity : AppCompatActivity() {
     private var lastActiveCenterX = 0f
     private var lastActiveCenterY = 0f
 
-
-    // Visual change detection (v0.2)
+    // Visual change detection
     private var lastDrawnSector = -1
     private var lastDrawnPc = -1
     private var lastDrawnFc = -1
@@ -60,7 +73,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // Forensic TX must remain OFF unless explicitly enabled.
         MidiOut.FORENSIC_TX_LOG = MusicalConstants.IS_DEBUG
 
         val density = resources.displayMetrics.density
@@ -68,10 +80,7 @@ class MainActivity : AppCompatActivity() {
         r2Px = MusicalConstants.BASE_RADIUS_OUTER * density
 
         gestureAnalyzer = GestureAnalyzerV01(r1Px, r2Px)
-
-        // v0.2 engine is parameterless (geometry comes from TouchMath / UI)
         harmonicEngine = HarmonicEngine()
-
         timbreNav = TimbreNavigator(
             maxPointerId = MusicalConstants.MAX_POINTER_ID,
             deadzonePx = 6f * density,
@@ -79,9 +88,84 @@ class MainActivity : AppCompatActivity() {
             rangeYPx = 220f * density
         )
 
-        overlay = HarmonicOverlayView(this, harmonicEngine)
-        setContentView(overlay)
+        // --- NEW UI SETUP ---
+        setupUI()
+
+        internalSynth = OboeSynthesizer()
+        midiFanOut = FanOutMidiSink(OboeMidiSink(internalSynth))
+        activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
+        updateMidiMode(mpeSwitch.isChecked)
+
         setupMidi()
+    }
+
+    /**
+     * Programmatically creates a FrameLayout with the Instrument on bottom
+     * and the Configuration Switch on top.
+     */
+    private fun setupUI() {
+        // 1. The Container
+        val container = FrameLayout(this)
+        container.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+
+        // 2. The Instrument View (Bottom Layer)
+        overlay = HarmonicOverlayView(this, harmonicEngine)
+        overlay.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        container.addView(overlay)
+
+        // 3. The MPE Switch (Top Layer)
+        mpeSwitch = Switch(this)
+        mpeSwitch.text = "MPE Mode   "
+        mpeSwitch.textSize = 14f
+        mpeSwitch.setTextColor(-1) // White text
+        mpeSwitch.isChecked = false // Default to Standard MIDI (safer for generic synths)
+
+        // Position: Top Right
+        val params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        params.gravity = Gravity.TOP or Gravity.END
+        params.setMargins(0, 48, 48, 0) // Margin for status bar
+        mpeSwitch.layoutParams = params
+
+        // 4. Handle Mode Switching
+        mpeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateMidiMode(isChecked)
+            val modeName = if (isChecked) "MPE (Multi-Ch)" else "Standard (Ch 1)"
+            Toast.makeText(this, "Mode: $modeName", Toast.LENGTH_SHORT).show()
+        }
+
+        container.addView(mpeSwitch)
+
+        // Set the container as the activity content
+        setContentView(container)
+    }
+
+    /**
+     * Swaps the VoiceLeader strategy without breaking the USB connection.
+     */
+    private fun updateMidiMode(useMpe: Boolean) {
+        val midi = activeMidiOut ?: return // Can't update if not connected
+
+        // 1. Silence current notes
+        voiceLeader?.allNotesOff()
+
+        // 2. Choose Strategy
+        val output: MidiOutput = if (useMpe) {
+            MpeMidiOutput(midi)
+        } else {
+            StandardMidiOutput(midi)
+        }
+
+        // 3. Replace VoiceLeader
+        voiceLeader = VoiceLeader(output)
     }
 
     private fun latchAttackVelocitiesFromFrame() {
@@ -101,6 +185,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Pass touch events to the Overlay manually if the Switch doesn't consume them?
+        // Actually, returning false here allows standard dispatch, but since we override onTouchEvent
+        // at the Activity level, we intercept everything not caught by views.
+        // The Switch will handle its own touches. We process the rest for music.
+
         try {
             TouchLogger.log(event, overlay.width, overlay.height)
             touchDriver.ingest(event)
@@ -120,14 +209,12 @@ class MainActivity : AppCompatActivity() {
             val addFinger = (fCount > lastPointerCount)
             val liftToZero = (fCount == 0 && lastPointerCount > 0)
 
-            // Semantic event detection (meaning only; time-based logic is elsewhere)
             var semanticEvent = when {
                 landing -> GestureAnalyzerV01.EVENT_LANDING
                 addFinger -> GestureAnalyzerV01.EVENT_ADD_FINGER
                 else -> GestureAnalyzerV01.EVENT_NONE
             }
 
-            // Transition Window: rhythmic-only re-articulation on rapid lift -> re-touch
             var transitionHit = false
             if (landing) {
                 transitionHit = transitionWindow.consumeIfHit(
@@ -151,7 +238,6 @@ class MainActivity : AppCompatActivity() {
 
             latchAttackVelocitiesFromFrame()
 
-            // Pointer down/up bookkeeping for timbre nav
             for (s in 0 until MusicalConstants.MAX_VOICES) {
                 val pid = touchFrame.pointerIds[s]
                 if (pid == TouchFrame.INVALID_ID) continue
@@ -166,7 +252,6 @@ class MainActivity : AppCompatActivity() {
 
             when (event.actionMasked) {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    // Arm Transition Window using last stable center + last finger count
                     if (lastPointerCount > 0) {
                         transitionWindow.arm(
                             touchFrame.tMs,
@@ -177,7 +262,6 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-                    // Clear active pointers
                     for (s in 0 until MusicalConstants.MAX_VOICES) {
                         activePointers[s] = -1
                     }
@@ -197,7 +281,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // If we detect lift-to-zero without ACTION_UP (edge case), arm the window here too.
             if (liftToZero) {
                 transitionWindow.arm(
                     touchFrame.tMs,
@@ -216,13 +299,11 @@ class MainActivity : AppCompatActivity() {
                 val expansion01 = ((spreadSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
                 touchDriver.expansion01 = expansion01
 
-                // Update active pointers array (slot-aligned)
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = touchFrame.pointerIds[s]
                     activePointers[s] = pid
                 }
 
-                // Continuous per-slot controls (aftertouch, PB, CC74)
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = touchFrame.pointerIds[s]
                     if (pid == TouchFrame.INVALID_ID) continue
@@ -248,7 +329,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Gesture analyzer updates semantic layers (triad/seventh)
                 if (!transitionHit) {
                     gestureAnalyzer.onSemanticEvent(touchFrame, fCount, spreadSmooth, semanticEvent)
                 }
@@ -264,10 +344,6 @@ class MainActivity : AppCompatActivity() {
                 val centerYNorm =
                     if (overlay.height > 0) (touchState.centerY / overlay.height.toFloat()) else 0.5f
 
-                // IMPORTANT (v0.2):
-                // On TransitionWindow hit, we must re-articulate the stored state verbatim.
-                // Do not run HarmonicEngine.update() in the same frame, or instability/spread
-                // can shift and alter harmony on the re-touch.
                 val changed = if (!transitionHit) {
                     harmonicEngine.update(
                         touchFrame.tMs,
@@ -286,9 +362,7 @@ class MainActivity : AppCompatActivity() {
                     MidiLogger.logHarmony(harmonicEngine.state)
                 }
 
-                // No frame-latch: harmony always active, update immediately
                 voiceLeader?.update(harmonicEngine.state, activePointers)
-
                 lastPointerCount = fCount
             } else {
                 lastPointerCount = 0
@@ -332,9 +406,13 @@ class MainActivity : AppCompatActivity() {
                     if (device != null) {
                         val port = device.openInputPort(0)
                         if (port != null) {
-                            val sink = AndroidMidiSink(port)
-                            val midi = MidiOut(sink, AndroidMonotonicClock, AndroidForensicLogger)
-                            voiceLeader = VoiceLeader(midi)
+                            externalMidiSink?.close()
+                            externalMidiSink = AndroidMidiSink(port)
+                            midiFanOut.setSecondary(externalMidiSink)
+
+                            // Initialize with current switch state
+                            updateMidiMode(mpeSwitch.isChecked)
+
                             runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
                         } else {
                             Log.w("MIDI", "Failed to open input port")
@@ -354,6 +432,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        internalSynth.stop()
         MidiLogger.logAllNotesOff("onPause")
         voiceLeader?.allNotesOff()
         harmonicEngine.onAllFingersLift(SystemClock.uptimeMillis())
@@ -366,5 +445,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         voiceLeader?.close()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        internalSynth.start()
     }
 }
