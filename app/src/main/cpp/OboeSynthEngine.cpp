@@ -9,7 +9,7 @@
 
 namespace {
 
-constexpr int kMaxChannels = 16;
+constexpr int kMaxChannels = 8;
 constexpr float kTwoPi = 6.283185307179586f;
 constexpr float kMaxGain = 0.2f;
 constexpr float kReleaseEpsilon = 0.0005f;
