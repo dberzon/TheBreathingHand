@@ -1,33 +1,33 @@
 package com.breathinghand.core
 
 /**
- * HCI Research Results (Chapters 3C + Gesture Grammar v0.1)
- * scientifically derived biomechanical constants.
+ * HCI Research Results (Chapters 3C + Gesture Grammar v0.2)
+ * Scientifically derived biomechanical constants.
+ *
+ * IMPORTANT:
+ * - This file must NOT contain temporal gating for harmony.
+ * - Any timing used in the project must be for rhythmic coherence only (Transition Window etc),
+ * and must live with those timing definitions (e.g. MusicalConstants).
  */
 object InputTuning {
+
     // -----------------------------------------------------------------
     // 1) SIGNAL CONDITIONING (1 Euro Filter)
     // -----------------------------------------------------------------
-    const val FILTER_MIN_CUTOFF = 1.0f  // Hz (Silences <0.4px jitter)
-    const val FILTER_BETA = 0.02f       // (Eliminates lag at >500px/s)
+    const val FILTER_MIN_CUTOFF = 1.0f  // Hz (silences <0.4px jitter)
+    const val FILTER_BETA = 0.02f       // (reduces lag at high velocity)
 
     // -----------------------------------------------------------------
     // 2) SPATIAL LOGIC (Hysteresis)
     // -----------------------------------------------------------------
-    const val ANGLE_HYSTERESIS_DEG = 2.0f    // Precision increased 300%
-    const val RADIUS_HYSTERESIS_PX = 100.0f  // Compensates for ~73px breath
+    // FIX: Removed unused constants (ANGLE_HYSTERESIS_DEG, RADIUS_HYSTERESIS_PX)
+    // Logic is now handled by HarmonicEngine parameters.
 
     // -----------------------------------------------------------------
-    // 3) TEMPORAL LOGIC (Legacy gates; keep for future experiments)
-    // -----------------------------------------------------------------
-    const val CHORD_ASSEMBLY_MS = 80L
-    const val CHORD_RETENTION_MS = 250L
-
-    // -----------------------------------------------------------------
-    // 4) GESTURE GRAMMAR v0.1 (Grip Archetype thresholds)
+    // 3) GESTURE GRAMMAR (Grip archetype thresholds)
     // -----------------------------------------------------------------
     // TRIAD (3 fingers)
-    // - CLUSTER if spread is tight relative to RED clutch radius.
+    // - CLUSTER if spread is tight relative to the small-radius stability zone.
     const val GRIP_CLUSTER_SPREAD_FACTOR = 0.90f
 
     // - STRETCH if triangle is very elongated.
@@ -37,6 +37,6 @@ object InputTuning {
     const val GRIP_STRETCH_MEAN_RATIO = 1.35f
 
     // SEVENTH (4 fingers)
-    // - WIDE spread relative to BLUE radius => minor 7th; otherwise major 7th.
+    // - WIDE spread at large radius => minor 7th; otherwise major 7th.
     const val GRIP_WIDE_SPREAD_FACTOR = 1.15f
 }

@@ -1,3 +1,5 @@
+@file:Suppress("ConstantConditionIf", "unused", "RedundantSuppression")
+
 package com.breathinghand
 
 import android.util.Log
@@ -7,10 +9,10 @@ import kotlin.math.max
 
 object TouchLogger {
     private const val TAG = "FORENSIC_DATA"
-    // Fix: Local constant to bypass unresolved BuildConfig
-    private const val IS_DEBUG = true
 
-    private val ENABLED = IS_DEBUG
+    // Default to FALSE for production performance
+    private const val ENABLED = false
+
     private var lastMoveLogMs: Long = 0L
 
     fun log(
@@ -20,6 +22,7 @@ object TouchLogger {
         moveMinIntervalMs: Long = 16L,
         includeHistory: Boolean = false
     ) {
+        // GUARD CLAUSE: Strict early exit
         if (!ENABLED) return
 
         val actionMasked = event.actionMasked
@@ -67,7 +70,6 @@ object TouchLogger {
             val xNorm = x / w.toFloat()
             val yNorm = y / h.toFloat()
 
-            // String.format allocates, but this is gated by ENABLED so it's safe for Prod
             val line = String.format(
                 Locale.US,
                 "%d,TOUCH_RAW,%s,%d,%d,%.2f,%.2f,%.5f,%.5f,%.4f,%.4f,%d",
