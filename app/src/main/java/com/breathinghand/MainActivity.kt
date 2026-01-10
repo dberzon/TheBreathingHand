@@ -8,11 +8,14 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.breathinghand.audio.OboeSynthesizer
 import com.breathinghand.core.*
 import com.breathinghand.core.midi.AndroidForensicLogger
 import com.breathinghand.core.midi.AndroidMonotonicClock
 import com.breathinghand.core.midi.AndroidMidiSink
+import com.breathinghand.core.midi.FanOutMidiSink
 import com.breathinghand.core.midi.MidiOut
+import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
 
 class MainActivity : AppCompatActivity() {
@@ -35,6 +38,9 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var voiceLeader: VoiceLeader? = null
+    private lateinit var internalSynth: OboeSynthesizer
+    private lateinit var midiFanOut: FanOutMidiSink
+    private var externalMidiSink: AndroidMidiSink? = null
     private lateinit var overlay: HarmonicOverlayView
 
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
@@ -78,6 +84,10 @@ class MainActivity : AppCompatActivity() {
             rangeXPx = 220f * density,
             rangeYPx = 220f * density
         )
+
+        internalSynth = OboeSynthesizer()
+        midiFanOut = FanOutMidiSink(OboeMidiSink(internalSynth))
+        voiceLeader = VoiceLeader(MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger))
 
         overlay = HarmonicOverlayView(this, harmonicEngine)
         setContentView(overlay)
@@ -332,9 +342,9 @@ class MainActivity : AppCompatActivity() {
                     if (device != null) {
                         val port = device.openInputPort(0)
                         if (port != null) {
-                            val sink = AndroidMidiSink(port)
-                            val midi = MidiOut(sink, AndroidMonotonicClock, AndroidForensicLogger)
-                            voiceLeader = VoiceLeader(midi)
+                            externalMidiSink?.close()
+                            externalMidiSink = AndroidMidiSink(port)
+                            midiFanOut.setSecondary(externalMidiSink)
                             runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
                         } else {
                             Log.w("MIDI", "Failed to open input port")
@@ -354,6 +364,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        internalSynth.stop()
         MidiLogger.logAllNotesOff("onPause")
         voiceLeader?.allNotesOff()
         harmonicEngine.onAllFingersLift(SystemClock.uptimeMillis())
@@ -366,5 +377,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         voiceLeader?.close()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        internalSynth.start()
     }
 }
