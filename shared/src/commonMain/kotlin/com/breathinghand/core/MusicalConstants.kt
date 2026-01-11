@@ -27,6 +27,10 @@ object MusicalConstants {
     const val CENTER_CC74 = 64
     const val DEFAULT_VELOCITY = 90
 
+    // Internal synth expression mapping (CC11) toggle.
+    // When false, CC11 streaming is bypassed and a single CC11=127 is sent at init.
+    const val INTERNAL_USE_CC11_EXPRESSION: Boolean = true
+
     // ----------------------------
     // v0.2 — Continuous Harmonic Field
     // ----------------------------

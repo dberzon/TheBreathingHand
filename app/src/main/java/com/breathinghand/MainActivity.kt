@@ -51,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var internalSynth: OboeSynthesizer
     private lateinit var midiFanOut: FanOutMidiSink
     private var externalMidiSink: AndroidMidiSink? = null
+    private var cc11BaselineSent: Boolean = false
 
     private lateinit var overlay: HarmonicOverlayView
     private lateinit var externalRoutingSwitch: Switch // External MIDI selector (MPE multi-channel / General MIDI single-channel)
@@ -317,6 +318,8 @@ class MainActivity : AppCompatActivity() {
 
         // 3. Replace VoiceLeader
         voiceLeader = VoiceLeader(output)
+        // Apply internal CC11 expression toggle from constants
+        voiceLeader?.setUseExpressionCc11(MusicalConstants.INTERNAL_USE_CC11_EXPRESSION)
     }
 
     private fun latchAttackVelocitiesFromFrame() {
@@ -984,5 +987,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         internalSynth.start()
+        // If internal CC11 expression is disabled, send baseline CC11=127 once to channel 0
+        if (!MusicalConstants.INTERNAL_USE_CC11_EXPRESSION && !cc11BaselineSent) {
+            try {
+                internalSynth.controlChange(0, 11, 127)
+                cc11BaselineSent = true
+            } catch (_: Exception) { /* ignore */ }
+        }
     }
 }

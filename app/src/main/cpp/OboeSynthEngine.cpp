@@ -165,7 +165,13 @@ public:
             loaded_soundfont_id_ = -1;
         }
         int id = fluid_synth_sfload(fs_synth_, path.c_str(), 1);
-        if (id < 0) return false;
+        if (id < 0) {
+            const char *err = nullptr;
+            if (fs_synth_) err = fluid_synth_error(fs_synth_);
+            __android_log_print(ANDROID_LOG_ERROR, "fluidsynth", "SF2 load failed: path=%s id=%d err=%s", path.c_str(), id, err ? err : "(null)");
+            return false;
+        }
+        __android_log_print(ANDROID_LOG_DEBUG, "fluidsynth", "SF2 loaded: path=%s id=%d", path.c_str(), id);
         loaded_soundfont_id_ = id;
         // Optionally set default GM program 0 on channel 0
         // Note: This is optional and safe to call from non-audio thread
@@ -414,6 +420,29 @@ private:
 
 #ifdef HAVE_FLUIDSYNTH
     // FluidSynth state (initialized off the audio thread)
+    // Tweakable defaults (adjust these if you need different balance/performance):
+    //  - kFluidSynthMasterGain: 0.6..0.8 is a conservative starting point for presence without clipping
+    //  - kFluidSynthPolyphony: 32..128 caps CPU use; 64 is a safe mobile default
+    //  - kFluidSynthInterpolation: 0=off, 1=linear (cheap), 2=4-point, 3=best (most expensive)
+    //  - Reverb and Chorus defaults chosen to be subtle and mobile-friendly (init-only)
+    static constexpr double kFluidSynthMasterGain = 0.7;
+    static constexpr int    kFluidSynthPolyphony  = 64;
+    static constexpr int    kFluidSynthInterpolation = 1;
+
+    // Reverb (synth.reverb.*)
+    static constexpr bool   kFluidSynthReverbActive = true;        // enable reverb at init
+    static constexpr double kFluidSynthReverbRoomSize = 0.45;     // 0.0..1.0, wetness/room size (moderate)
+    static constexpr double kFluidSynthReverbDamp = 0.20;         // 0.0..1.0, high-frequency damping (soft)
+    static constexpr double kFluidSynthReverbLevel = 0.35;        // 0.0..1.0, output amplitude of the reverb
+    static constexpr double kFluidSynthReverbWidth = 0.8;         // stereo spread (0..100, 0..1 recommended)
+
+    // Chorus (synth.chorus.*)
+    static constexpr bool   kFluidSynthChorusActive = true;      // enable chorus at init
+    static constexpr int    kFluidSynthChorusNr = 2;             // number of chorus voices (0..99)
+    static constexpr double kFluidSynthChorusLevel = 0.30;       // 0.0..10.0, output amplitude of chorus
+    static constexpr double kFluidSynthChorusDepth = 4.0;        // 0.0..256.0, modulation depth
+    static constexpr double kFluidSynthChorusSpeed = 0.25;       // 0.1..5.0 Hz, modulation speed
+
     fluid_settings_t *fs_settings_ = nullptr;
     fluid_synth_t *fs_synth_ = nullptr;
     bool fs_initialized_ = false;
@@ -424,13 +453,53 @@ private:
         if (fs_initialized_) return true;
         fs_settings_ = new_fluid_settings();
         if (!fs_settings_) return false;
+
+        // Ensure sample rate matches our Oboe output
         fluid_settings_setnum(fs_settings_, "synth.sample-rate", static_cast<double>(sampleRate_.load()));
+
+        // Master gain: presence without clipping (adjust via kFluidSynthMasterGain)
+        fluid_settings_setnum(fs_settings_, "synth.gain", static_cast<double>(kFluidSynthMasterGain));
+
+        // Limit polyphony to avoid CPU spikes on mobile
+        fluid_settings_setnum(fs_settings_, "synth.polyphony", static_cast<double>(kFluidSynthPolyphony));
+
+        // Interpolation quality (1=linear is a good mobile default)
+        fluid_settings_setnum(fs_settings_, "synth.interpolation", static_cast<double>(kFluidSynthInterpolation));
+
+        // Reverb: init-only tasteful defaults (can be changed at runtime if needed)
+        fluid_settings_setint(fs_settings_, "synth.reverb.active", kFluidSynthReverbActive ? 1 : 0);
+        fluid_settings_setnum(fs_settings_, "synth.reverb.room-size", kFluidSynthReverbRoomSize);
+        fluid_settings_setnum(fs_settings_, "synth.reverb.damp", kFluidSynthReverbDamp);
+        fluid_settings_setnum(fs_settings_, "synth.reverb.level", kFluidSynthReverbLevel);
+        fluid_settings_setnum(fs_settings_, "synth.reverb.width", kFluidSynthReverbWidth);
+
+        // Chorus: init-only tasteful defaults (subtle chorus to add width without metallic artifacts)
+        fluid_settings_setint(fs_settings_, "synth.chorus.active", kFluidSynthChorusActive ? 1 : 0);
+        fluid_settings_setint(fs_settings_, "synth.chorus.nr", kFluidSynthChorusNr);
+        fluid_settings_setnum(fs_settings_, "synth.chorus.level", kFluidSynthChorusLevel);
+        fluid_settings_setnum(fs_settings_, "synth.chorus.depth", kFluidSynthChorusDepth);
+        fluid_settings_setnum(fs_settings_, "synth.chorus.speed", kFluidSynthChorusSpeed);
+
+        __android_log_print(ANDROID_LOG_DEBUG, "fluidsynth", "Init settings: gain=%.3f poly=%d interp=%d sampleRate=%.0f",
+                            static_cast<double>(kFluidSynthMasterGain), kFluidSynthPolyphony, kFluidSynthInterpolation, static_cast<double>(sampleRate_.load()));
+        __android_log_print(ANDROID_LOG_DEBUG, "fluidsynth", "Reverb: active=%d room=%.2f damp=%.2f width=%.2f level=%.2f",
+                            kFluidSynthReverbActive ? 1 : 0, kFluidSynthReverbRoomSize, kFluidSynthReverbDamp, kFluidSynthReverbWidth, kFluidSynthReverbLevel);
+        __android_log_print(ANDROID_LOG_DEBUG, "fluidsynth", "Chorus: active=%d nr=%d level=%.2f depth=%.2f speed=%.2f",
+                            kFluidSynthChorusActive ? 1 : 0, kFluidSynthChorusNr, kFluidSynthChorusLevel, kFluidSynthChorusDepth, kFluidSynthChorusSpeed);
+
         fs_synth_ = new_fluid_synth(fs_settings_);
         if (!fs_synth_) {
             delete_fluid_settings(fs_settings_);
             fs_settings_ = nullptr;
             return false;
         }
+
+        // As a safety, explicitly set the synth sample-rate on the synth instance as well (may be deprecated in upstream)
+        // This keeps the sample-rate consistent even if some code reads it directly from the synth object.
+        #if 1
+        fluid_synth_set_sample_rate(fs_synth_, static_cast<int>(sampleRate_.load()));
+        #endif
+
         if (!sf2Path.empty()) {
             loaded_soundfont_id_ = fluid_synth_sfload(fs_synth_, sf2Path.c_str(), 1);
             // loaded_soundfont_id_ < 0 indicates failure to load the SF2

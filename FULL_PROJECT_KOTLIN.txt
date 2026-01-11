@@ -1,5 +1,5 @@
-﻿=== FULL KOTLIN PROJECT - ALL FILES WITH SUBFOLDERS ===
-Generated on 01/11/2026 08:29:10
+=== FULL KOTLIN PROJECT - ALL FILES WITH SUBFOLDERS ===
+Generated on 01/11/2026 18:02:04
 
 
 FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\androidTest\java\com\breathinghand\core\ExampleInstrumentedTest.kt
@@ -300,6 +300,27 @@ class OboeSynthesizer {
         }
     }
 
+    /**
+     * Load a SoundFont (SF2) from a filesystem path. Must be called off the audio thread.
+     * Returns true on success, false on failure (or if synth not initialized).
+     */
+    fun loadSoundFontFromPath(path: String): Boolean {
+        if (nativeHandle == 0L) return false
+        return nativeLoadSoundFont(nativeHandle, path)
+    }
+
+    /** Initialize FluidSynth state (must be called from non-audio thread). */
+    fun initFluidSynth(): Boolean {
+        if (nativeHandle == 0L) return false
+        return nativeInitFluidSynth(nativeHandle)
+    }
+
+    /** Shutdown FluidSynth and free native resources. */
+    fun shutdownFluidSynth(): Boolean {
+        if (nativeHandle == 0L) return false
+        return nativeShutdownFluidSynth(nativeHandle)
+    }
+
     private external fun nativeCreate(): Long
     private external fun nativeDelete(handle: Long)
     private external fun nativeStart(handle: Long)
@@ -314,6 +335,15 @@ class OboeSynthesizer {
     private external fun nativeSetWaveform(handle: Long, index: Int)
     private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
     private external fun nativeRegisterSample(handle: Long, buffer: java.nio.ByteBuffer?, size: Long, rootNote: Int, loKey: Int, hiKey: Int, name: String?)
+    private external fun nativeLoadSoundFont(handle: Long, path: String?): Boolean
+    private external fun nativeInitFluidSynth(handle: Long): Boolean
+    private external fun nativeShutdownFluidSynth(handle: Long): Boolean
+
+    /** Returns whether FluidSynth support was compiled into the native library. */
+    fun isFluidSynthCompiled(): Boolean {
+        return nativeIsFluidSynthCompiled()
+    }
+    private external fun nativeIsFluidSynthCompiled(): Boolean
 
     fun getLoadedSampleNames(): Array<String> {
         if (nativeHandle == 0L) return arrayOf()
@@ -788,6 +818,87 @@ class FanOutMidiSink(private val primary: MidiSink) : MidiSink {
         secondary?.close()
         secondary = null
         primary.close()
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\midi\MonoChannelMidiSink.kt
+
+package com.breathinghand.core.midi
+
+import android.util.Log
+
+/**
+ * Wraps a MidiSink and forwards all NOTE ON/OFF messages to channel 0 (mono internal channel).
+ * For continuous controllers (Pitch Bend, Channel Pressure, CC) only forwards messages that
+ * originate on channel 0 (standard) or channel 1 (slot 0 in MPE) to avoid "fighting" across
+ * multiple fingers. This enforces mono-expression for the internal synth while allowing
+ * external sinks to receive the original (possibly multi-channel) messages.
+ */
+class MonoChannelMidiSink(private val inner: MidiSink) : MidiSink {
+
+    override fun send3(status: Int, data1: Int, data2: Int) {
+        val cmd = status and 0xF0
+        val ch = status and 0x0F
+
+        when (cmd) {
+            0x90, 0x80 -> {
+                // Note On / Note Off -> always map to channel 0 for internal synth
+                Log.d("BreathingHand", "MonoChannelMidiSink: NOTE ${if (cmd==0x90) "ON" else "OFF"} from ch $ch -> ch 0 note=$data1 vel=$data2")
+                val s = cmd or 0
+                inner.send3(s, data1, data2)
+            }
+            0xB0 -> {
+                // CC -> only accept from primary (channel 0) or MPE slot 0 (channel 1)
+                if (ch == 0 || ch == 1) {
+                    Log.d("BreathingHand", "MonoChannelMidiSink: CC from ch $ch -> ch 0 cc=${data1} val=${data2}")
+                    val s = 0xB0 or 0
+                    inner.send3(s, data1, data2)
+                } else {
+                    Log.d("BreathingHand", "MonoChannelMidiSink: CC ignored from ch $ch")
+                }
+            }
+            0xE0 -> {
+                // Pitch Bend -> only accept from primary
+                if (ch == 0 || ch == 1) {
+                    Log.d("BreathingHand", "MonoChannelMidiSink: PitchBend from ch $ch -> ch 0 lsb=${data1} msb=${data2}")
+                    val s = 0xE0 or 0
+                    inner.send3(s, data1, data2)
+                } else {
+                    Log.d("BreathingHand", "MonoChannelMidiSink: PitchBend ignored from ch $ch")
+                }
+            }
+            else -> {
+                // Fallback: map channel to 0 and forward
+                Log.d("BreathingHand", "MonoChannelMidiSink: Fallback cmd=0x${cmd.toString(16)} from ch $ch")
+                val s = (cmd) or 0
+                inner.send3(s, data1, data2)
+            }
+        }
+    }
+
+    override fun send2(status: Int, data1: Int) {
+        val cmd = status and 0xF0
+        val ch = status and 0x0F
+        if (cmd == 0xD0) {
+            // Channel pressure -> only accept from primary
+            if (ch == 0 || ch == 1) {
+                Log.d("BreathingHand", "MonoChannelMidiSink: ChannelPressure from ch $ch -> ch 0 val=$data1")
+                inner.send2(0xD0 or 0, data1)
+            } else {
+                Log.d("BreathingHand", "MonoChannelMidiSink: ChannelPressure ignored from ch $ch")
+            }
+            return
+        }
+        // Otherwise forward, mapped to channel 0
+        Log.d("BreathingHand", "MonoChannelMidiSink: send2 fallback cmd=0x${cmd.toString(16)}")
+        inner.send2(status and 0xF0 or 0, data1)
+    }
+
+    override fun close() {
+        inner.close()
     }
 }
 
@@ -1522,6 +1633,7 @@ import com.breathinghand.core.midi.AndroidForensicLogger
 import com.breathinghand.core.midi.AndroidMonotonicClock
 import com.breathinghand.core.midi.AndroidMidiSink
 import com.breathinghand.core.midi.FanOutMidiSink
+import com.breathinghand.core.midi.MonoChannelMidiSink
 import com.breathinghand.core.midi.MidiOut
 import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
@@ -1548,14 +1660,15 @@ class MainActivity : AppCompatActivity() {
     @Volatile
     private var voiceLeader: VoiceLeader? = null
 
-    // We keep a reference to the raw MIDI transport so we can swap modes without reconnecting
+    // We keep a reference to the raw MIDI transport so we can swap routing without reconnecting
     private var activeMidiOut: MidiOut? = null
     private lateinit var internalSynth: OboeSynthesizer
     private lateinit var midiFanOut: FanOutMidiSink
     private var externalMidiSink: AndroidMidiSink? = null
+    private var cc11BaselineSent: Boolean = false
 
     private lateinit var overlay: HarmonicOverlayView
-    private lateinit var mpeSwitch: Switch // The new Tick Box
+    private lateinit var externalRoutingSwitch: Switch // External MIDI selector (MPE multi-channel / General MIDI single-channel)
 
     // Activity result launcher for picking a single audio file (WAV) — simple custom wavetable
     private val pickWavLauncher = registerForActivityResult(
@@ -1576,6 +1689,13 @@ class MainActivity : AppCompatActivity() {
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { onSfzPicked(it) }
+    }
+
+    // SF2 file picker
+    private val pickSf2Launcher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onSf2Picked(it) }
     }
 
     // Pick a folder that contains sample files (OpenDocumentTree)
@@ -1630,12 +1750,17 @@ class MainActivity : AppCompatActivity() {
         )
 
         internalSynth = OboeSynthesizer()
-        midiFanOut = FanOutMidiSink(OboeMidiSink(internalSynth))
+        midiFanOut = FanOutMidiSink(MonoChannelMidiSink(OboeMidiSink(internalSynth)))
         activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
+
+        // Debug: auto-run self-test if requested via intent extra 'selfTest' (debug only)
+        if (intent?.getBooleanExtra("selfTest", false) == true) {
+            runSelfTest()
+        }
 
         // --- NEW UI SETUP ---
         setupUI()
-        updateMidiMode(mpeSwitch.isChecked)
+        // External routing will be initialized after the switch is created below.
 
         setupMidi()
     }
@@ -1660,12 +1785,12 @@ class MainActivity : AppCompatActivity() {
         )
         container.addView(overlay)
 
-        // 3. The MPE Switch (Top Layer)
-        mpeSwitch = Switch(this)
-        mpeSwitch.text = "MPE Mode   "
-        mpeSwitch.textSize = 14f
-        mpeSwitch.setTextColor(-1) // White text
-        mpeSwitch.isChecked = true // Default to MPE (enable internal synth polyphony)
+        // 3. External MIDI Mode switch (Top Right)
+        externalRoutingSwitch = Switch(this)
+        externalRoutingSwitch.textSize = 14f
+        externalRoutingSwitch.setTextColor(-1) // White text
+        externalRoutingSwitch.isChecked = true // Default to External MPE (multi-channel)
+        externalRoutingSwitch.text = if (externalRoutingSwitch.isChecked) getString(R.string.external_midi_label_mpe) else getString(R.string.external_midi_label_gm)
 
         // Position: Top Right
         val params = FrameLayout.LayoutParams(
@@ -1674,23 +1799,61 @@ class MainActivity : AppCompatActivity() {
         )
         params.gravity = Gravity.TOP or Gravity.END
         params.setMargins(0, 48, 48, 0) // Margin for status bar
-        mpeSwitch.layoutParams = params
+        externalRoutingSwitch.layoutParams = params
 
-        // 4. Handle Mode Switching
-        mpeSwitch.setOnCheckedChangeListener { _, isChecked ->
-            updateMidiMode(isChecked)
-            val modeName = if (isChecked) "MPE (Multi-Ch)" else "Standard (Ch 1)"
-            Toast.makeText(this, "Mode: $modeName", Toast.LENGTH_SHORT).show()
+        // 4. Handle External MIDI Mode Switching (affects external output only)
+        externalRoutingSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateMidiRouting(isChecked)
+            val routingName = if (isChecked) getString(R.string.external_midi_name_mpe) else getString(R.string.external_midi_name_gm)
+            // Update switch label to reflect current external routing
+            externalRoutingSwitch.text = "External MIDI: $routingName"
+            Toast.makeText(this, "External MIDI: $routingName", Toast.LENGTH_SHORT).show()
         }
 
         // Long-press the switch to pick a custom wavetable (.wav). Uses a DirectByteBuffer and hands it to native code.
-        mpeSwitch.setOnLongClickListener {
+        externalRoutingSwitch.setOnLongClickListener {
             pickWavLauncher.launch(arrayOf("audio/wav", "audio/*"))
             Toast.makeText(this, "Pick a .wav to load as wavetable", Toast.LENGTH_SHORT).show()
             true
         }
 
-        container.addView(mpeSwitch)
+        container.addView(externalRoutingSwitch)
+        // Initialize external routing state (affects external output only; internal synth remains on channel 0)
+        updateMidiRouting(externalRoutingSwitch.isChecked)
+
+        // 5. FluidSynth switch (below routing switch)
+        val fluidsynthSwitch = Switch(this)
+        fluidsynthSwitch.textSize = 14f
+        fluidsynthSwitch.setTextColor(-1)
+        fluidsynthSwitch.isChecked = false
+        fluidsynthSwitch.text = "FluidSynth: Off"
+
+        val fsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        // place under routing switch (same top/right alignment with extra offset)
+        fsParams.gravity = Gravity.TOP or Gravity.END
+        fsParams.setMargins(0, 112, 48, 0)
+        fluidsynthSwitch.layoutParams = fsParams
+
+        fluidsynthSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                // Launch SF2 picker (user picks a soundfont)
+                pickSf2Launcher.launch(arrayOf("*/*"))
+            } else {
+                // Turn off: shutdown synth
+                importScope.launch {
+                    val ok = internalSynth.shutdownFluidSynth()
+                    runOnUiThread {
+                        fluidsynthSwitch.text = if (ok) "FluidSynth: Off" else "FluidSynth: Off"
+                        if (ok) Toast.makeText(this@MainActivity, "FluidSynth shutdown", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        container.addView(fluidsynthSwitch)
 
         // Controls overlay (floating)
         val controlsOverlay = ControlsOverlayView(this, internalSynth)
@@ -1752,16 +1915,16 @@ class MainActivity : AppCompatActivity() {
 
 
     /**
-     * Swaps the VoiceLeader strategy without breaking the USB connection.
+     * Swaps the VoiceLeader routing strategy without breaking the USB connection.
      */
-    private fun updateMidiMode(useMpe: Boolean) {
+    private fun updateMidiRouting(useMultiChannel: Boolean) {
         val midi = activeMidiOut ?: return // Can't update if not connected
 
         // 1. Silence current notes
         voiceLeader?.allNotesOff()
 
         // 2. Choose Strategy
-        val output: MidiOutput = if (useMpe) {
+        val output: MidiOutput = if (useMultiChannel) {
             MpeMidiOutput(midi)
         } else {
             StandardMidiOutput(midi)
@@ -1769,6 +1932,8 @@ class MainActivity : AppCompatActivity() {
 
         // 3. Replace VoiceLeader
         voiceLeader = VoiceLeader(output)
+        // Apply internal CC11 expression toggle from constants
+        voiceLeader?.setUseExpressionCc11(MusicalConstants.INTERNAL_USE_CC11_EXPRESSION)
     }
 
     private fun latchAttackVelocitiesFromFrame() {
@@ -1806,6 +1971,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val importScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+
+    // Temporary cache path for loaded soundfonts
+    private fun cachedSf2File(): java.io.File {
+        return java.io.File(cacheDir, "loaded_soundfont.sf2")
+    }
 
     private fun showMappedSampleDialog(uri: android.net.Uri) {
         // Dialog to ask for root, lo, hi (simple numeric inputs)
@@ -1922,6 +2092,83 @@ class MainActivity : AppCompatActivity() {
             pickSfzFolderLauncher.launch(null)
         } catch (e: java.io.IOException) {
             Toast.makeText(this, "Failed to read SFZ: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun onSf2Picked(uri: android.net.Uri) {
+        // Quick runtime check whether native FluidSynth support is compiled in
+        if (!internalSynth.isFluidSynthCompiled()) {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "FluidSynth support is not included in this build. Add third_party/fluidsynth (headers + per-ABI libs) and rebuild.", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+
+        // Copy SF2 to app cache then init FluidSynth and load it (IO coroutine)
+        importScope.launch {
+            try {
+                val outFile = cachedSf2File()
+                contentResolver.openInputStream(uri)?.use { input ->
+                    java.io.FileOutputStream(outFile).use { out ->
+                        input.copyTo(out)
+                    }
+                }
+
+                // Initialize synth first (non-audio thread)
+                val initOk = internalSynth.initFluidSynth()
+                if (!initOk) {
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Failed to initialize FluidSynth", Toast.LENGTH_LONG).show() }
+                    return@launch
+                }
+
+                val loadOk = internalSynth.loadSoundFontFromPath(outFile.absolutePath)
+                runOnUiThread {
+                    if (loadOk) {
+                        Toast.makeText(this@MainActivity, "Loaded SoundFont", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Failed to load SoundFont", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                runOnUiThread { Toast.makeText(this@MainActivity, "SF2 load failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    // Debug helper: auto-load a test SF2 from /sdcard/Download/test.sf2 and emit a small MIDI sequence
+    private fun runSelfTest() {
+        importScope.launch {
+            try {
+                android.util.Log.d("BreathingHand", "runSelfTest: Starting self-test (loading /sdcard/Download/test.sf2)")
+                val initOk = internalSynth.initFluidSynth()
+                if (!initOk) {
+                    android.util.Log.e("BreathingHand", "runSelfTest: initFluidSynth() failed")
+                    return@launch
+                }
+                val loadOk = internalSynth.loadSoundFontFromPath("/sdcard/Download/test.sf2")
+                android.util.Log.d("BreathingHand", "runSelfTest: loadSoundFontFromPath -> $loadOk")
+                if (!loadOk) return@launch
+
+                // Emit test MIDI: pitch bend on primary (ch 0), then NOTE ON on ch 5 (should map to ch 0 internally)
+                // pitch bend: send3(status=0xE0|0, lsb=127, msb=127) -> upward bend
+                midiFanOut.send3(0xE0 or 0, 127, 127)
+                kotlinx.coroutines.delay(150)
+
+                // Note on channel 5 (should be remapped to channel 0 for internal synth)
+                midiFanOut.send3(0x90 or 5, 60, 100)
+                kotlinx.coroutines.delay(600)
+
+                // Channel pressure on primary (ch 0) - should affect internal synth
+                midiFanOut.send2(0xD0 or 0, 80)
+                kotlinx.coroutines.delay(300)
+
+                // Note off
+                midiFanOut.send3(0x80 or 5, 60, 0)
+                android.util.Log.d("BreathingHand", "runSelfTest: Sequence complete")
+            } catch (e: Exception) {
+                android.util.Log.e("BreathingHand", "runSelfTest: exception ${'$'}e")
+            }
         }
     }
 
@@ -2354,6 +2601,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         internalSynth.start()
+        // If internal CC11 expression is disabled, send baseline CC11=127 once to channel 0
+        if (!MusicalConstants.INTERNAL_USE_CC11_EXPRESSION && !cc11BaselineSent) {
+            try {
+                internalSynth.controlChange(0, 11, 127)
+                cc11BaselineSent = true
+            } catch (_: Exception) { /* ignore */ }
+        }
     }
 }
 
@@ -3563,6 +3817,10 @@ object MusicalConstants {
     const val CENTER_CC74 = 64
     const val DEFAULT_VELOCITY = 90
 
+    // Internal synth expression mapping (CC11) toggle.
+    // When false, CC11 streaming is bypassed and a single CC11=127 is sent at init.
+    const val INTERNAL_USE_CC11_EXPRESSION: Boolean = true
+
     // ----------------------------
     // v0.2 — Continuous Harmonic Field
     // ----------------------------
@@ -3883,6 +4141,8 @@ FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\ko
 
 package com.breathinghand.core
 
+import kotlin.math.pow
+
 /**
  * Slot-stable MPE voice (slot index == voice index).
  * PointerId binding is absolute: slot i is always MIDI channel (i+1).
@@ -3940,6 +4200,24 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
         IntArray(MusicalConstants.MAX_VOICES) { MusicalConstants.CENTER_CC74 }
     private val lastSentCC74 = IntArray(MusicalConstants.MAX_VOICES) { -1 }
 
+    // CC11 (Expression) mapping — mono internal path (no allocations).
+    // Tweakables (adjust these for desired responsiveness):
+    // - MIN_EXPRESSION: the minimum CC11 value (floor) to avoid very quiet synth.
+    // - CC11_CURVE_EXPONENT: curve exponent (<1 boosts small pressures; 1.0 is linear).
+    private val MIN_EXPRESSION = 80 // Tweakable: minimum CC11 (0..127)
+    private val CC11_CURVE_EXPONENT = 0.5f // Tweakable: <1 boosts small values
+
+    // Per-slot targets (set from aftertouch); final CC11 sent is the max across slots.
+    private val pendingCC11Target = IntArray(MusicalConstants.MAX_VOICES) { 0 }
+
+    // Feature flag: enable or disable Expression -> CC11 mapping for internal synth.
+    // Default from MusicalConstants. Can be exposed in UI later.
+    private var useExpressionCc11: Boolean = MusicalConstants.INTERNAL_USE_CC11_EXPRESSION
+
+    // Mono smoothed/dedup state sent to internal synth (channel 0).
+    private var pendingCC11SmoothedMono = 0
+    private var lastSentCC11Mono = -1
+
     // Last harmony snapshot that affects mapping (keeps hot path stable).
     private var lastRootPc = Int.MIN_VALUE
     private var lastFingerCount = Int.MIN_VALUE
@@ -3986,6 +4264,7 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
         flushAftertouch()
         flushPitchBend()
         flushCC74()
+        flushCC11()
     }
 
     /**
@@ -4004,12 +4283,25 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
 
     fun setSlotAftertouch(slotIndex: Int, pointerId: Int, value: Int) {
         if (slotIndex !in 0 until MusicalConstants.MAX_VOICES) return
-        pendingAftertouch[slotIndex] = value.coerceIn(0, 127)
+        val val8 = value.coerceIn(0, 127)
+        pendingAftertouch[slotIndex] = val8
+        // Map aftertouch to CC11 (Expression) target for smoothing/dedup (per-slot target)
+        pendingCC11Target[slotIndex] = mapAftertouchToCC11(val8)
 
         val v = voices[slotIndex]
         if (v.pointerId == TouchFrame.INVALID_ID && pointerId != TouchFrame.INVALID_ID) {
             v.pointerId = pointerId
         }
+    }
+
+    // Map an 0..127 aftertouch value into CC11 with a minimum floor and gentle curve.
+    private fun mapAftertouchToCC11(after: Int): Int {
+        // Normalize to 0..1
+        val norm = after.coerceIn(0, 127) / 127f
+        // Apply gentle curve (exponent < 1 boosts small values)
+        val curved = norm.pow(CC11_CURVE_EXPONENT)
+        val scaled = MIN_EXPRESSION + curved * (127 - MIN_EXPRESSION)
+        return (scaled + 0.5f).toInt().coerceIn(MIN_EXPRESSION, 127)
     }
 
     fun setSlotPitchBend(slotIndex: Int, pointerId: Int, bend14: Int) {
@@ -4057,6 +4349,33 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
             lastSentCC74[i] = v
             output.cc(i, 74, v) // CHANGED
         }
+    }
+
+    private fun flushCC11() {
+        // Bypass: if disabled, do not send CC11 at all (velocity-only loudness).
+        if (!useExpressionCc11) return
+
+        // Aggregate per-slot targets (max), apply fixed-point exponential smoothing
+        // and send a single CC#11 on channel 0 (internal synth). This prevents
+        // per-slot CC11 flooding to external MPE channels while keeping mono-expression.
+        var target = 0
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val t = pendingCC11Target[i]
+            if (t > target) target = t
+        }
+        val prev = pendingCC11SmoothedMono
+        val smoothed = ((prev * 7) + target) ushr 3 // alpha=1/8
+        if (smoothed == pendingCC11SmoothedMono && smoothed == lastSentCC11Mono) return
+        pendingCC11SmoothedMono = smoothed
+        if (smoothed == lastSentCC11Mono) return
+        lastSentCC11Mono = smoothed
+        // Send to slot 0 -> channel 1 in MPE, and MonoChannel sink maps it to internal channel 0
+        output.cc(0, 11, smoothed)
+    }
+
+    /** Enable/disable Expression→CC11 mapping for internal synth (default: true). */
+    fun setUseExpressionCc11(enabled: Boolean) {
+        useExpressionCc11 = enabled
     }
 
     /**
@@ -4284,6 +4603,13 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
 
             pendingCC74[i] = MusicalConstants.CENTER_CC74
             lastSentCC74[i] = -1
+
+            pendingCC11Target[i] = 0
+            // Mono smoothed state reset handled once below
+
+        // Reset mono CC11 smoothing/dedup
+        pendingCC11SmoothedMono = 0
+        lastSentCC11Mono = -1
         }
 
         // Reset velocity cache to default values
