@@ -43,8 +43,11 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
     private val activeSlotsScratch = IntArray(MusicalConstants.MAX_VOICES)
 
     private var lastActiveCount = 0
-    private var lastFrameActiveSlots = 0
-    private var retargetFreezeFrames = 0
+    
+    // Serial-based harmony gate: prevents note emission until harmony catches up with touch changes.
+    private var touchSerial = 0                    // Increments when active slot count changes
+    private var harmonySerialApplied = -1          // Set to touchSerial when harmony updates
+    private var lastActiveSlotsSerialCount = 0     // Previous active count for change detection
 
     // PointerId -> velocity lookup (O(1), no allocations).
     private val velocityByPointerId =
@@ -111,43 +114,52 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
      * @param input Harmonic state (layered).
      * @param activePointerIds slot-aligned pointerIds; TouchFrame.INVALID_ID for empty slots.
      */
-    fun update(input: HarmonicState, activePointerIds: IntArray) {
-        val harmonicChanged =
-            input.rootPc != lastRootPc ||
-                    input.fingerCount != lastFingerCount ||
-                    input.triad != lastTriad ||
-                    input.seventh != lastSeventh ||
-                    (input.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
+fun update(input: HarmonicState, activePointerIds: IntArray) {
 
-        if (harmonicChanged) {
-            lastRootPc = input.rootPc
-            lastFingerCount = input.fingerCount
-            lastTriad = input.triad
-            lastSeventh = input.seventh
-            lastUnstable = input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+    // 1) Allocation first (immediate noteOffs happen here)
+    updateAllocationBySlot(activePointerIds)
 
-            HarmonicFieldMapV01.fillRoleNotes(input, roleNotes)
-        }
-
-        updateAllocationBySlot(activePointerIds)
-
-        val activeNow = countActiveSlots()
-        if (activeNow < lastFrameActiveSlots) {
-            retargetFreezeFrames = 2
-        }
-        lastFrameActiveSlots = activeNow
-
-        if (retargetFreezeFrames > 0) {
-            retargetFreezeFrames--
-            flushContinuous()
-            return
-        }
-
-        updateRolesByFingerChanges()
-        updateTargetsByRole()
-        solveAndSendBySlot()
-        flushContinuous()
+    // 2) Touch serial bump BEFORE harmony is applied
+    val activeNow = countActiveSlots()
+    val touchChanged = (activeNow != lastActiveSlotsSerialCount)
+    if (touchChanged) {
+        touchSerial++
+        lastActiveSlotsSerialCount = activeNow
     }
+
+    // 3) Now evaluate whether harmony changed, using committed last* state
+    val harmonicChanged =
+        input.rootPc != lastRootPc ||
+        input.fingerCount != lastFingerCount ||
+        input.triad != lastTriad ||
+        input.seventh != lastSeventh ||
+        (input.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
+
+    if (harmonicChanged) {
+        lastRootPc = input.rootPc
+        lastFingerCount = input.fingerCount
+        lastTriad = input.triad
+        lastSeventh = input.seventh
+        lastUnstable = input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+
+        HarmonicFieldMapV01.fillRoleNotes(input, roleNotes)
+
+        // Harmony snapshot is now valid for this touch serial
+        harmonySerialApplied = touchSerial
+    }
+
+    // 4) Gate note emission until harmony is acked for current touch serial
+    if (harmonySerialApplied != touchSerial) {
+        flushContinuous()
+        return
+    }
+
+    // 5) Normal note logic
+    updateRolesByFingerChanges()
+    updateTargetsByRole()
+    solveAndSendBySlot()
+    flushContinuous()
+}
 
     private fun countActiveSlots(): Int {
         var count = 0
@@ -567,8 +579,9 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
     pendingCC11SmoothedMono = 0
     lastSentCC11Mono = -1
     cc11SendCooldown = 0
-    lastFrameActiveSlots = 0
-    retargetFreezeFrames = 0
+    touchSerial = 0
+    harmonySerialApplied = -1
+    lastActiveSlotsSerialCount = 0
 
     // Reset velocity cache to default values
     for (i in 0 until velocityByPointerId.size) {

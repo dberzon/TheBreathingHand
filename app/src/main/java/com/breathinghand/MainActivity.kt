@@ -24,11 +24,14 @@ import com.breathinghand.core.midi.MidiOut
 import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
 import kotlinx.coroutines.*
+import android.os.Handler
+import android.os.Looper
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG_SEM = "BH_SEM"
+        private const val COALESCE_WINDOW_MS = 10L
     }
 
     private val touchState = MutableTouchPolar()
@@ -42,6 +45,12 @@ class MainActivity : AppCompatActivity() {
     private var r1Px: Float = 0f
     private var r2Px: Float = 0f
     private val startTime = System.nanoTime()
+
+    // Release coalescing: batch near-simultaneous pointer-up events
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var coalesceStartMs: Long = 0L
+    private var isCoalescing: Boolean = false
+    private var coalescedEvent: MotionEvent? = null
 
     @Volatile
     private var voiceLeader: VoiceLeader? = null
@@ -730,6 +739,49 @@ class MainActivity : AppCompatActivity() {
         // at the Activity level, we intercept everything not caught by views.
         // The Switch will handle its own touches. We process the rest for music.
 
+        // Coalescing strategy: batch near-simultaneous POINTER_UP events to eliminate intermediate states.
+        // When multiple fingers lift within ~10ms, we see them as one atomic change.
+        // This ensures activePointerIds and HarmonicState derive from the same TouchFrame snapshot.
+        val actionMasked = event.actionMasked
+
+        if (actionMasked == MotionEvent.ACTION_POINTER_UP) {
+            val now = android.os.SystemClock.uptimeMillis()
+
+            if (!isCoalescing) {
+                // Start coalescing window
+                isCoalescing = true
+                coalesceStartMs = now
+                coalescedEvent?.recycle()
+                coalescedEvent = MotionEvent.obtain(event)
+
+                mainHandler.postDelayed({
+                    // Window expired - process coalesced event
+                    coalescedEvent?.let { processTouchEventInternal(it) }
+                    coalescedEvent?.recycle()
+                    coalescedEvent = null
+                    isCoalescing = false
+                }, COALESCE_WINDOW_MS)
+
+                return true
+            } else {
+                // Within coalescing window - update coalesced event
+                if (now - coalesceStartMs < COALESCE_WINDOW_MS) {
+                    coalescedEvent?.recycle()
+                    coalescedEvent = MotionEvent.obtain(event)
+                    return true
+                } else {
+                    // Window already expired, process immediately
+                    isCoalescing = false
+                }
+            }
+        }
+
+        // Not coalescing, or event type doesn't coalesce - process immediately
+        return processTouchEventInternal(event)
+    }
+
+    private fun processTouchEventInternal(event: MotionEvent): Boolean {
+
         try {
             TouchLogger.log(event, overlay.width, overlay.height)
             touchDriver.ingest(event)
@@ -981,6 +1033,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
+        coalescedEvent?.recycle()
+        coalescedEvent = null
         voiceLeader?.close()
     }
 
