@@ -22,6 +22,7 @@ import com.breathinghand.core.midi.FanOutMidiSink
 import com.breathinghand.core.midi.MidiOut
 import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
+import kotlinx.coroutines.*
 
 class MainActivity : AppCompatActivity() {
 
@@ -44,14 +45,14 @@ class MainActivity : AppCompatActivity() {
     @Volatile
     private var voiceLeader: VoiceLeader? = null
 
-    // We keep a reference to the raw MIDI transport so we can swap modes without reconnecting
+    // We keep a reference to the raw MIDI transport so we can swap routing without reconnecting
     private var activeMidiOut: MidiOut? = null
     private lateinit var internalSynth: OboeSynthesizer
     private lateinit var midiFanOut: FanOutMidiSink
     private var externalMidiSink: AndroidMidiSink? = null
 
     private lateinit var overlay: HarmonicOverlayView
-    private lateinit var mpeSwitch: Switch // The new Tick Box
+    private lateinit var routingSwitch: Switch // The routing switch (Multi-Channel / Single-Channel)
 
     // Activity result launcher for picking a single audio file (WAV) — simple custom wavetable
     private val pickWavLauncher = registerForActivityResult(
@@ -131,7 +132,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- NEW UI SETUP ---
         setupUI()
-        updateMidiMode(mpeSwitch.isChecked)
+        updateMidiRouting(routingSwitch.isChecked)
 
         setupMidi()
     }
@@ -156,12 +157,12 @@ class MainActivity : AppCompatActivity() {
         )
         container.addView(overlay)
 
-        // 3. The MPE Switch (Top Layer)
-        mpeSwitch = Switch(this)
-        mpeSwitch.text = "MPE Mode   "
-        mpeSwitch.textSize = 14f
-        mpeSwitch.setTextColor(-1) // White text
-        mpeSwitch.isChecked = true // Default to MPE (enable internal synth polyphony)
+        // 3. The Routing Switch (Top Layer)
+        routingSwitch = Switch(this)
+        routingSwitch.textSize = 14f
+        routingSwitch.setTextColor(-1) // White text
+        routingSwitch.isChecked = true // Default to Multi-Channel routing (enable internal synth polyphony)
+        routingSwitch.text = if (routingSwitch.isChecked) "Routing: Multi-Channel" else "Routing: Single-Channel"
 
         // Position: Top Right
         val params = FrameLayout.LayoutParams(
@@ -170,23 +171,25 @@ class MainActivity : AppCompatActivity() {
         )
         params.gravity = Gravity.TOP or Gravity.END
         params.setMargins(0, 48, 48, 0) // Margin for status bar
-        mpeSwitch.layoutParams = params
+        routingSwitch.layoutParams = params
 
-        // 4. Handle Mode Switching
-        mpeSwitch.setOnCheckedChangeListener { _, isChecked ->
-            updateMidiMode(isChecked)
-            val modeName = if (isChecked) "MPE (Multi-Ch)" else "Standard (Ch 1)"
-            Toast.makeText(this, "Mode: $modeName", Toast.LENGTH_SHORT).show()
+        // 4. Handle Routing Switching
+        routingSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateMidiRouting(isChecked)
+            val routingName = if (isChecked) "Multi-Channel" else "Single-Channel"
+            // Update switch label to reflect current routing
+            routingSwitch.text = "Routing: $routingName"
+            Toast.makeText(this, "Routing: $routingName", Toast.LENGTH_SHORT).show()
         }
 
         // Long-press the switch to pick a custom wavetable (.wav). Uses a DirectByteBuffer and hands it to native code.
-        mpeSwitch.setOnLongClickListener {
+        routingSwitch.setOnLongClickListener {
             pickWavLauncher.launch(arrayOf("audio/wav", "audio/*"))
             Toast.makeText(this, "Pick a .wav to load as wavetable", Toast.LENGTH_SHORT).show()
             true
         }
 
-        container.addView(mpeSwitch)
+        container.addView(routingSwitch)
 
         // Controls overlay (floating)
         val controlsOverlay = ControlsOverlayView(this, internalSynth)
@@ -248,16 +251,16 @@ class MainActivity : AppCompatActivity() {
 
 
     /**
-     * Swaps the VoiceLeader strategy without breaking the USB connection.
+     * Swaps the VoiceLeader routing strategy without breaking the USB connection.
      */
-    private fun updateMidiMode(useMpe: Boolean) {
+    private fun updateMidiRouting(useMultiChannel: Boolean) {
         val midi = activeMidiOut ?: return // Can't update if not connected
 
         // 1. Silence current notes
         voiceLeader?.allNotesOff()
 
         // 2. Choose Strategy
-        val output: MidiOutput = if (useMpe) {
+        val output: MidiOutput = if (useMultiChannel) {
             MpeMidiOutput(midi)
         } else {
             StandardMidiOutput(midi)
@@ -301,6 +304,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val importScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+
     private fun showMappedSampleDialog(uri: android.net.Uri) {
         // Dialog to ask for root, lo, hi (simple numeric inputs)
         val builder = androidx.appcompat.app.AlertDialog.Builder(this)
@@ -325,25 +330,43 @@ class MainActivity : AppCompatActivity() {
             val root = rootInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 60
             val lo = loInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 0
             val hi = hiInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 127
-            // Read file and register
-            try {
-                contentResolver.openInputStream(uri)?.use { input ->
-                    val bytes = input.readBytes()
-                    val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                    bb.put(bytes)
+
+            // Run decode/register on IO scope so we don't block main thread
+            importScope.launch {
+                try {
+                    val mime = contentResolver.getType(uri) ?: ""
+                    val wavBytes: ByteArray? = if (mime.contains("wav") || uri.path?.endsWith(".wav", ignoreCase = true) == true) {
+                        // Read raw wav bytes directly
+                        contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    } else {
+                        // Attempt to decode compressed audio to WAV
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Decoding sample...", Toast.LENGTH_SHORT).show() }
+                        com.breathinghand.audio.AudioDecoder.decodeToWavBytes(this@MainActivity, uri)
+                    }
+
+                    if (wavBytes == null) {
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Failed to decode sample (unsupported format)", Toast.LENGTH_LONG).show() }
+                        return@launch
+                    }
+
+                    val bb = java.nio.ByteBuffer.allocateDirect(wavBytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    bb.put(wavBytes)
                     bb.rewind()
+
                     val before = internalSynth.getLoadedSampleNames().toSet()
                     internalSynth.registerSampleFromByteBuffer(bb, root, lo, hi)
                     val after = internalSynth.getLoadedSampleNames().toSet()
                     val added = after - before
                     if (added.isNotEmpty()) {
-                        Toast.makeText(this, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show()
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show() }
                     } else {
-                        Toast.makeText(this, "Registration attempted but no sample was added (check logs)", Toast.LENGTH_LONG).show()
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Registration attempted but no sample was added (check logs)", Toast.LENGTH_LONG).show() }
                     }
+
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Failed to register sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show() }
                 }
-            } catch (e: java.io.IOException) {
-                Toast.makeText(this, "Failed to register sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
         builder.setNegativeButton("Cancel", null)
@@ -439,7 +462,8 @@ class MainActivity : AppCompatActivity() {
         val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, treeUri)
         val missing = mutableListOf<String>()
         val before = internalSynth.getLoadedSampleNames().toSet()
-        regions.forEach { r ->
+        val decodeJobs = mutableListOf<kotlinx.coroutines.Deferred<Pair<Boolean,String?>>>()
+        for (r in regions) {
             val name = r.sampleName
             var doc = tree?.findFile(name)
             if (doc == null) {
@@ -450,20 +474,54 @@ class MainActivity : AppCompatActivity() {
             if (doc == null) {
                 missing.add(name)
             } else {
-                try {
-                    contentResolver.openInputStream(doc.uri)?.use { input ->
-                        val bytes = input.readBytes()
-                        val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                        bb.put(bytes)
+                // Launch async decode+register per-file
+                val job = importScope.async {
+                    try {
+                        val mime = contentResolver.getType(doc.uri) ?: ""
+                        val wavBytes = if (mime.contains("wav") || (doc.name?.endsWith(".wav", true) == true)) {
+                            contentResolver.openInputStream(doc.uri)?.use { it.readBytes() }
+                        } else {
+                            com.breathinghand.audio.AudioDecoder.decodeToWavBytes(this@MainActivity, doc.uri)
+                        }
+
+                        if (wavBytes == null) {
+                            return@async Pair(false, name)
+                        }
+
+                        val bb = java.nio.ByteBuffer.allocateDirect(wavBytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                        bb.put(wavBytes)
                         bb.rewind()
-                        val name = getDisplayNameFromDoc(doc) ?: r.sampleName.substringAfterLast('/')
-                        internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, name)
+                        val display = getDisplayNameFromDoc(doc) ?: r.sampleName.substringAfterLast('/')
+                        internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, display)
+                        return@async Pair(true, display)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        return@async Pair(false, name)
                     }
-                } catch (e: java.io.IOException) {
-                    missing.add(name)
+                }
+                decodeJobs.add(job)
+            }
+        }
+
+        // Launch a background job to await decodes and report results when done
+        importScope.launch {
+            val results = decodeJobs.map { it.await() }
+            val successNames = results.filter { it.first }.mapNotNull { it.second }
+            val failedNames = results.filter { !it.first }.mapNotNull { it.second }
+
+            runOnUiThread {
+                if (failedNames.isNotEmpty()) {
+                    Toast.makeText(this@MainActivity, "${failedNames.size} files failed to import", Toast.LENGTH_LONG).show()
+                }
+                if (successNames.isNotEmpty()) {
+                    Toast.makeText(this@MainActivity, "Imported ${successNames.size} regions from SFZ", Toast.LENGTH_SHORT).show()
+                    pendingSfzRegions = null
                 }
             }
         }
+        // Immediately return; background job will update UI when finished
+        Toast.makeText(this, "Importing ${regions.size - missing.size} files...", Toast.LENGTH_SHORT).show()
+        return
         val after = internalSynth.getLoadedSampleNames().toSet()
         val added = after - before
         if (missing.isEmpty() && added.isNotEmpty()) {

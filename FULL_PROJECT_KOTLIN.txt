@@ -1,0 +1,4331 @@
+﻿=== FULL KOTLIN PROJECT - ALL FILES WITH SUBFOLDERS ===
+Generated on 01/11/2026 08:29:10
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\androidTest\java\com\breathinghand\core\ExampleInstrumentedTest.kt
+
+package com.breathinghand.core
+
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.ext.junit.runners.AndroidJUnit4
+
+import org.junit.Test
+import org.junit.runner.RunWith
+
+import org.junit.Assert.*
+
+/**
+ * Instrumented test, which will execute on an Android device.
+ *
+ * See [testing documentation](http://d.android.com/tools/testing).
+ */
+@RunWith(AndroidJUnit4::class)
+class ExampleInstrumentedTest {
+    @Test
+    fun useAppContext() {
+        // Context of the app under test.
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        assertEquals("com.breathinghand.core", appContext.packageName)
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\audio\AudioDecoder.kt
+
+package com.breathinghand.audio
+
+import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.net.Uri
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import kotlin.math.min
+
+private const val TAG = "AudioDecoder"
+
+/**
+ * Decode an audio Uri (OGG, MP3, AAC, etc.) to a valid WAV file byte array (PCM16 little-endian).
+ * Returns null on failure.
+ */
+object AudioDecoder {
+    suspend fun decodeToWavBytes(context: Context, uri: Uri): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val extractor = MediaExtractor()
+            extractor.setDataSource(context, uri, null)
+
+            // Find first audio track
+            var trackIndex = -1
+            var format: MediaFormat? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("audio/")) {
+                    trackIndex = i
+                    format = f
+                    break
+                }
+            }
+            if (trackIndex < 0 || format == null) {
+                Log.w(TAG, "No audio track found for $uri")
+                extractor.release()
+                return@withContext null
+            }
+
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val channels = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 1
+
+            Log.i(TAG, "Decoding: mime=$mime sr=$sampleRate ch=$channels")
+
+            val codec = MediaCodec.createDecoderByType(mime)
+            codec.configure(format, null, null, 0)
+            codec.start()
+
+            extractor.selectTrack(trackIndex)
+
+            val inputBuffers = codec.inputBuffers
+            val outputBuffers = codec.outputBuffers
+            val info = MediaCodec.BufferInfo()
+
+            val pcmOut = ByteArrayOutputStream()
+            var sawOutputEOS = false
+            var sawInputEOS = false
+
+            while (!sawOutputEOS) {
+                if (!sawInputEOS) {
+                    val inIndex = codec.dequeueInputBuffer(10000)
+                    if (inIndex >= 0) {
+                        val dst = inputBuffers[inIndex]
+                        val sampleSize = extractor.readSampleData(dst, 0)
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            sawInputEOS = true
+                        } else {
+                            val presentationTimeUs = extractor.sampleTime
+                            codec.queueInputBuffer(inIndex, 0, sampleSize, presentationTimeUs, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                val outIndex = codec.dequeueOutputBuffer(info, 10000)
+                if (outIndex >= 0) {
+                    val outBuf = outputBuffers[outIndex]
+                    if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        codec.releaseOutputBuffer(outIndex, false)
+                        continue
+                    }
+
+                    if (info.size > 0) {
+                        outBuf.position(info.offset)
+                        outBuf.limit(info.offset + info.size)
+
+                        val chunk = ByteArray(info.size)
+                        outBuf.get(chunk)
+                        pcmOut.write(chunk)
+                    }
+
+                    codec.releaseOutputBuffer(outIndex, false)
+
+                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        sawOutputEOS = true
+                    }
+                } else if (outIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                    // update reference
+                } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val newFormat = codec.outputFormat
+                    Log.i(TAG, "Output format changed: $newFormat")
+                }
+            }
+
+            codec.stop()
+            codec.release()
+            extractor.release()
+
+            val pcmBytes = pcmOut.toByteArray()
+            if (pcmBytes.isEmpty()) {
+                Log.w(TAG, "Decoded PCM is empty for $uri")
+                return@withContext null
+            }
+
+            // Wrap PCM into a WAV (PCM 16-bit little-endian). The decoder commonly produces 16-bit PCM.
+            val wav = buildWavFromPcm(pcmBytes, sampleRate, channels, 16)
+            Log.i(TAG, "Decoded and built WAV: ${wav.size} bytes")
+            return@withContext wav
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Decode failed: ${e.message}")
+            return@withContext null
+        }
+    }
+
+    fun buildWavFromPcm(pcm: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int): ByteArray {
+        val byteRate = sampleRate * channels * bitsPerSample / 8
+        val blockAlign = channels * bitsPerSample / 8
+        val dataSize = pcm.size
+        val header = ByteArrayOutputStream()
+
+        // RIFF header
+        header.write("RIFF".toByteArray())
+        header.write(intToLittleEndian(36 + dataSize)) // chunk size
+        header.write("WAVE".toByteArray())
+
+        // fmt chunk
+        header.write("fmt ".toByteArray())
+        header.write(intToLittleEndian(16)) // subchunk1 size
+        header.write(shortToLittleEndian(1)) // PCM = 1
+        header.write(shortToLittleEndian(channels.toShort()))
+        header.write(intToLittleEndian(sampleRate))
+        header.write(intToLittleEndian(byteRate))
+        header.write(shortToLittleEndian(blockAlign.toShort()))
+        header.write(shortToLittleEndian(bitsPerSample.toShort()))
+
+        // data chunk
+        header.write("data".toByteArray())
+        header.write(intToLittleEndian(dataSize))
+        header.write(pcm)
+
+        return header.toByteArray()
+    }
+
+    private fun intToLittleEndian(v: Int): ByteArray {
+        return byteArrayOf((v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(), ((v shr 16) and 0xFF).toByte(), ((v shr 24) and 0xFF).toByte())
+    }
+
+    private fun shortToLittleEndian(v: Short): ByteArray {
+        val iv = v.toInt()
+        return byteArrayOf((iv and 0xFF).toByte(), ((iv shr 8) and 0xFF).toByte())
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\audio\OboeSynthesizer.kt
+
+package com.breathinghand.audio
+
+class OboeSynthesizer {
+    private var nativeHandle: Long = 0L
+
+    init {
+        System.loadLibrary("oboe_synth")
+        nativeHandle = nativeCreate()
+    }
+
+    fun start() {
+        if (nativeHandle != 0L) {
+            nativeStart(nativeHandle)
+        }
+    }
+
+    fun stop() {
+        if (nativeHandle != 0L) {
+            nativeStop(nativeHandle)
+        }
+    }
+
+    fun noteOn(channel: Int, note: Int, velocity: Int) {
+        if (nativeHandle != 0L) {
+            nativeNoteOn(nativeHandle, channel, note, velocity)
+        }
+    }
+
+    fun noteOff(channel: Int, note: Int) {
+        if (nativeHandle != 0L) {
+            nativeNoteOff(nativeHandle, channel, note)
+        }
+    }
+
+    fun pitchBend(channel: Int, bend14: Int) {
+        if (nativeHandle != 0L) {
+            nativePitchBend(nativeHandle, channel, bend14)
+        }
+    }
+
+    fun channelPressure(channel: Int, pressure: Int) {
+        if (nativeHandle != 0L) {
+            nativeChannelPressure(nativeHandle, channel, pressure)
+        }
+    }
+
+    fun controlChange(channel: Int, cc: Int, value: Int) {
+        if (nativeHandle != 0L) {
+            nativeControlChange(nativeHandle, channel, cc, value)
+        }
+    }
+
+    fun setFilterCutoff(channel: Int, cutoffHz: Float) {
+        if (nativeHandle != 0L) {
+            nativeSetFilterCutoff(nativeHandle, channel, cutoffHz)
+        }
+    }
+
+    fun setEnvelope(channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float) {
+        if (nativeHandle != 0L) {
+            nativeSetEnvelope(nativeHandle, channel, attackMs, decayMs, sustainLevel, releaseMs)
+        }
+    }
+
+    fun setWaveform(index: Int) {
+        if (nativeHandle != 0L) {
+            nativeSetWaveform(nativeHandle, index)
+        }
+    }
+
+    // Load user-supplied wavetable data from a DirectByteBuffer and pass to native layer
+    fun loadWavetableFromByteBuffer(buffer: java.nio.ByteBuffer) {
+        if (nativeHandle != 0L) {
+            nativeLoadWavetableFromDirectBuffer(nativeHandle, buffer, buffer.capacity().toLong())
+        }
+    }
+
+    fun registerSampleFromByteBuffer(buffer: java.nio.ByteBuffer, rootNote: Int, loKey: Int, hiKey: Int, name: String? = null) {
+        if (nativeHandle != 0L) {
+            nativeRegisterSample(nativeHandle, buffer, buffer.capacity().toLong(), rootNote, loKey, hiKey, name)
+        }
+    }
+
+    fun close() {
+        if (nativeHandle != 0L) {
+            nativeStop(nativeHandle)
+            nativeDelete(nativeHandle)
+            nativeHandle = 0L
+        }
+    }
+
+    private external fun nativeCreate(): Long
+    private external fun nativeDelete(handle: Long)
+    private external fun nativeStart(handle: Long)
+    private external fun nativeStop(handle: Long)
+    private external fun nativeNoteOn(handle: Long, channel: Int, note: Int, velocity: Int)
+    private external fun nativeNoteOff(handle: Long, channel: Int, note: Int)
+    private external fun nativePitchBend(handle: Long, channel: Int, bend14: Int)
+    private external fun nativeChannelPressure(handle: Long, channel: Int, pressure: Int)
+    private external fun nativeControlChange(handle: Long, channel: Int, cc: Int, value: Int)
+    private external fun nativeSetFilterCutoff(handle: Long, channel: Int, cutoffHz: Float)
+    private external fun nativeSetEnvelope(handle: Long, channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float)
+    private external fun nativeSetWaveform(handle: Long, index: Int)
+    private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
+    private external fun nativeRegisterSample(handle: Long, buffer: java.nio.ByteBuffer?, size: Long, rootNote: Int, loKey: Int, hiKey: Int, name: String?)
+
+    fun getLoadedSampleNames(): Array<String> {
+        if (nativeHandle == 0L) return arrayOf()
+        return nativeGetLoadedSampleNames(nativeHandle) ?: arrayOf()
+    }
+
+    fun unloadSample(index: Int) {
+        if (nativeHandle == 0L) return
+        nativeUnloadSample(nativeHandle, index)
+    }
+
+    private external fun nativeGetLoadedSampleNames(handle: Long): Array<String>?
+    private external fun nativeUnloadSample(handle: Long, index: Int)
+}
+
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\ControlsOverlayView.kt
+
+package com.breathinghand
+
+import android.content.Context
+import android.graphics.Color
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.View
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
+import com.breathinghand.audio.OboeSynthesizer
+
+/**
+ * Compact floating controls panel for ADSR + Filter cutoff.
+ * Applies edits to all synth channels (0..7).
+ */
+class ControlsOverlayView(context: Context, private val synth: OboeSynthesizer) : FrameLayout(context) {
+    private val panel: LinearLayout
+    private val toggle: ImageButton
+
+    // Callback invoked when user wants to load a mapped sample
+    var onLoadMappedSample: (() -> Unit)? = null
+
+    // Callback invoked when user wants to import an SFZ file and associated samples
+    var onImportSfz: (() -> Unit)? = null
+
+    // Callback invoked when user wants to manage loaded samples
+    var onManageSamples: (() -> Unit)? = null
+
+    init {
+        // Toggle button
+        toggle = ImageButton(context)
+        toggle.setImageResource(android.R.drawable.ic_menu_manage)
+        toggle.setBackgroundColor(Color.argb(160, 0, 0, 0))
+        val tParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        tParams.gravity = Gravity.BOTTOM or Gravity.END
+        toggle.layoutParams = tParams
+        toggle.setOnClickListener {
+            panel.visibility = if (panel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        addView(toggle)
+
+        // Panel
+        panel = LinearLayout(context)
+        panel.orientation = LinearLayout.VERTICAL
+        panel.setBackgroundColor(Color.argb(220, 0, 0, 0))
+        val pad = (8 * resources.displayMetrics.density).toInt()
+        panel.setPadding(pad, pad, pad, pad)
+        val pParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        pParams.gravity = Gravity.BOTTOM or Gravity.END
+        panel.layoutParams = pParams
+
+        // Add controls: cutoff, attack, decay, sustain, release
+        addControl("Cutoff", 127) { progress ->
+            val vNorm = progress / 127.0
+            val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+            setAllCutoff(cutoff)
+        }
+        addControl("Attack (ms)", 2000) { progress ->
+            val attackMs = progress.coerceAtLeast(1).toFloat()
+            setAllEnvelope(attackMs, null, null, null)
+        }
+        addControl("Decay (ms)", 2000) { progress ->
+            val decayMs = progress.coerceAtLeast(1).toFloat()
+            setAllEnvelope(null, decayMs, null, null)
+        }
+        addControl("Sustain (%)", 100) { progress ->
+            val sustain = (progress / 100.0f).coerceIn(0f, 1f)
+            setAllEnvelope(null, null, sustain, null)
+        }
+        addControl("Release (ms)", 3000) { progress ->
+            val releaseMs = progress.coerceAtLeast(1).toFloat()
+            setAllEnvelope(null, null, null, releaseMs)
+        }
+
+        // Waveform selector with active indicator
+        val waveNames = arrayOf("Sine", "Triangle", "Saw", "Square")
+        val waveRow = LinearLayout(context)
+        waveRow.orientation = LinearLayout.HORIZONTAL
+
+        // Label showing current waveform
+        val waveLabel = TextView(context)
+        waveLabel.setTextColor(Color.LTGRAY)
+        waveLabel.text = "Waveform: ${waveNames[0]}"
+        waveLabel.setPadding(8, 6, 8, 6)
+        panel.addView(waveLabel)
+
+        var selectedWaveIndex = 0
+        fun setSelectedWave(idx: Int) {
+            selectedWaveIndex = idx
+            waveLabel.text = "Waveform: ${waveNames[idx]}"
+            for (j in 0 until waveRow.childCount) {
+                val c = waveRow.getChildAt(j) as TextView
+                c.setBackgroundColor(if (j == idx) Color.argb(140, 255, 255, 255) else Color.TRANSPARENT)
+            }
+        }
+
+        for ((i, name) in waveNames.withIndex()) {
+            val btn = TextView(context)
+            btn.setTextColor(Color.WHITE)
+            btn.text = name
+            btn.setPadding(12, 8, 12, 8)
+            btn.setOnClickListener {
+                setSelectedWave(i)
+                synth.setWaveform(i)
+            }
+            waveRow.addView(btn)
+        }
+        // Initialize highlight
+        setSelectedWave(0)
+
+        val wlp = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        wlp.setMargins(0, 8, 0, 8)
+        panel.addView(waveRow, wlp)
+
+        // Load mapped sample button
+        val loadSampleBtn = TextView(context)
+        loadSampleBtn.setTextColor(Color.WHITE)
+        loadSampleBtn.text = "Load Sample Map"
+        loadSampleBtn.setPadding(12, 8, 12, 8)
+        loadSampleBtn.setOnClickListener {
+            onLoadMappedSample?.invoke()
+        }
+        panel.addView(loadSampleBtn, wlp)
+
+        // Import SFZ button
+        val importSfzBtn = TextView(context)
+        importSfzBtn.setTextColor(Color.WHITE)
+        importSfzBtn.text = "Import SFZ"
+        importSfzBtn.setPadding(12, 8, 12, 8)
+        importSfzBtn.setOnClickListener {
+            onImportSfz?.invoke()
+        }
+        panel.addView(importSfzBtn, wlp)
+
+        // Manage samples button
+        val manageBtn = TextView(context)
+        manageBtn.setTextColor(Color.WHITE)
+        manageBtn.text = "Manage Samples"
+        manageBtn.setPadding(12, 8, 12, 8)
+        manageBtn.setOnClickListener {
+            onManageSamples?.invoke()
+        }
+        panel.addView(manageBtn, wlp)
+
+        addView(panel)
+        panel.visibility = View.GONE
+    }
+
+    private fun addControl(labelText: String, max: Int, onChange: (Int) -> Unit) {
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.VERTICAL
+        val label = TextView(context)
+        label.setTextColor(Color.WHITE)
+        label.text = labelText
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        val seek = SeekBar(context)
+        seek.max = max
+        seek.progress = max / 2
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                onChange(progress)
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        row.addView(label)
+        row.addView(seek)
+        val lp = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, 8, 0, 8)
+        panel.addView(row, lp)
+    }
+
+    private var envAttack: Float? = null
+    private var envDecay: Float? = null
+    private var envSustain: Float? = null
+    private var envRelease: Float? = null
+
+    private fun setAllCutoff(cutoff: Float) {
+        for (i in 0 until 8) synth.setFilterCutoff(i, cutoff)
+    }
+
+    private fun setAllEnvelope(attackMs: Float?, decayMs: Float?, sustain: Float?, releaseMs: Float?) {
+        if (attackMs != null) envAttack = attackMs
+        if (decayMs != null) envDecay = decayMs
+        if (sustain != null) envSustain = sustain
+        if (releaseMs != null) envRelease = releaseMs
+        val a = envAttack ?: 5f
+        val d = envDecay ?: 50f
+        val s = envSustain ?: 0.8f
+        val r = envRelease ?: 100f
+        for (i in 0 until 8) synth.setEnvelope(i, a, d, s, r)
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\AndroidTouchDriver.kt
+
+package com.breathinghand.core
+
+import android.view.MotionEvent
+
+/**
+ * Android "Nerves" driver:
+ * MotionEvent -> SmartInputHAL -> TouchFrame
+ *
+ * No allocations per ingest().
+ */
+class AndroidTouchDriver(
+    maxSlots: Int = MusicalConstants.MAX_VOICES
+) {
+    private val hal = SmartInputHAL(maxSlots = maxSlots)
+    val frame = TouchFrame(maxVoices = maxSlots)
+
+    /**
+     * Optional expansion signal (0..1). Will be used on subsequent ingests,
+     * same as your current flow.
+     */
+    var expansion01: Float
+        get() = hal.expansion01
+        set(v) { hal.expansion01 = v }
+
+    fun ingest(ev: MotionEvent): TouchFrame {
+        hal.ingest(ev)
+
+        frame.tMs = ev.eventTime
+        frame.activeCount = hal.activeCount
+
+        val n = frame.pointerIds.size
+        for (s in 0 until n) {
+            frame.pointerIds[s] = hal.slotPointerId[s]
+            frame.x[s] = hal.x[s]
+            frame.y[s] = hal.y[s]
+            frame.force01[s] = hal.force[s]
+            frame.pressure[s] = hal.rawPressure[s]
+            frame.size[s] = hal.rawSize[s]
+            frame.flags[s] = hal.flags[s]
+        }
+        return frame
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\HarmonicOverlayView.kt
+
+package com.breathinghand.core
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.view.View
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
+
+private val NOTE_NAMES = arrayOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
+
+private fun midiToName(m: Int): String {
+    val pc = (m % 12 + 12) % 12
+    val octave = m / 12 - 1
+    return "${NOTE_NAMES[pc]}$octave"
+}
+
+class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeWidth = 5f
+        style = Paint.Style.STROKE
+    }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        alpha = 50
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val cx = width / 2f
+        val cy = height / 2f
+        val r = min(width, height) * 0.4f
+
+        val s = engine.state
+        val unstable = s.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+        val color = if (unstable) -65536 else -16776961
+        paint.color = color
+        fillPaint.color = color
+
+        // 1) (Removed) Breathing Circle — replaced by chord display
+
+        // 2) Sectors
+        val sectorCount = MusicalConstants.SECTOR_COUNT
+        val sectorRad = (2.0 * Math.PI / sectorCount.toDouble())
+        for (i in 0 until sectorCount) {
+            val a = i * sectorRad
+            canvas.drawLine(
+                cx, cy,
+                cx + r * sin(a).toFloat(),
+                cy - r * cos(a).toFloat(),
+                paint
+            )
+        }
+
+        // 3) Active functional sector indicator (thick)
+        val activeAngle = (s.functionSector + 0.5) * sectorRad
+        paint.strokeWidth = 12f
+        canvas.drawLine(
+            cx, cy,
+            cx + r * sin(activeAngle).toFloat(),
+            cy - r * cos(activeAngle).toFloat(),
+            paint
+        )
+        paint.strokeWidth = 5f // reset
+
+        // 4) Chord display — show real-time chord notes computed from HarmonicFieldMapV01
+        val roleNotes = IntArray(4)
+        val roleCount = HarmonicFieldMapV01.fillRoleNotes(s, roleNotes)
+        if (roleCount > 0) {
+            val names = mutableListOf<String>()
+            for (i in 0 until roleCount) {
+                val m = roleNotes[i]
+                names.add(midiToName(m))
+            }
+
+            val quality = when {
+                s.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD -> "dim"
+                s.triad == GestureAnalyzerV01.TRIAD_STRETCH -> "min"
+                s.triad == GestureAnalyzerV01.TRIAD_CLUSTER -> "sus4"
+                else -> "maj"
+            }
+
+            val chordText = "Chord: ${names.joinToString(" ")} ($quality)"
+
+            // Background for readability
+            fillPaint.alpha = 160
+            val padding = 12f
+            val textSize = 40f
+            paint.textSize = textSize
+            val textWidth = paint.measureText(chordText)
+            val left = cx - textWidth / 2 - padding
+            val top = cy - r - 24f - textSize
+            val right = cx + textWidth / 2 + padding
+            val bottom = top + textSize + padding * 1.5f
+            val bgColor = if (unstable) -65536 else -16776961
+            fillPaint.color = bgColor
+            canvas.drawRoundRect(left, top, right, bottom, 8f, 8f, fillPaint)
+
+            paint.style = Paint.Style.FILL
+            paint.color = -1 // white text
+            canvas.drawText(chordText, cx - textWidth / 2, top + textSize, paint)
+            paint.style = Paint.Style.STROKE
+            paint.color = color // restore
+        }
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\midi\AndroidMidiPlatform.kt
+
+package com.breathinghand.core.midi
+
+import android.os.SystemClock
+import android.util.Log
+
+object AndroidForensicLogger : ForensicLogger {
+    override fun log(tag: String, message: String) {
+        Log.d(tag, message)
+    }
+}
+
+object AndroidMonotonicClock : MonotonicClock {
+    override fun nowMs(): Long = SystemClock.uptimeMillis()
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\midi\AndroidMidiSink.kt
+
+package com.breathinghand.core.midi
+
+import android.media.midi.MidiInputPort
+import android.util.Log
+import java.io.IOException
+
+class AndroidMidiSink(private val port: MidiInputPort) : MidiSink {
+    private val buffer3 = ByteArray(3)
+    private val buffer2 = ByteArray(2)
+
+    override fun send3(status: Int, data1: Int, data2: Int) {
+        try {
+            buffer3[0] = status.toByte()
+            buffer3[1] = data1.toByte()
+            buffer3[2] = data2.toByte()
+            port.send(buffer3, 0, 3)
+        } catch (e: IOException) {
+            Log.w("AndroidMidiSink", "send3 failed", e)
+        }
+    }
+
+    override fun send2(status: Int, data1: Int) {
+        try {
+            buffer2[0] = status.toByte()
+            buffer2[1] = data1.toByte()
+            port.send(buffer2, 0, 2)
+        } catch (e: IOException) {
+            Log.w("AndroidMidiSink", "send2 failed", e)
+        }
+    }
+
+    override fun close() {
+        try { port.close() } catch (e: IOException) {
+            Log.w("AndroidMidiSink", "close failed", e)
+        }
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\midi\FanOutMidiSink.kt
+
+package com.breathinghand.core.midi
+
+class FanOutMidiSink(private val primary: MidiSink) : MidiSink {
+    @Volatile
+    private var secondary: MidiSink? = null
+
+    fun setSecondary(sink: MidiSink?) {
+        secondary?.close()
+        secondary = sink
+    }
+
+    override fun send3(status: Int, data1: Int, data2: Int) {
+        primary.send3(status, data1, data2)
+        secondary?.send3(status, data1, data2)
+    }
+
+    override fun send2(status: Int, data1: Int) {
+        primary.send2(status, data1)
+        secondary?.send2(status, data1)
+    }
+
+    override fun close() {
+        secondary?.close()
+        secondary = null
+        primary.close()
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\midi\OboeMidiSink.kt
+
+package com.breathinghand.core.midi
+
+import com.breathinghand.audio.OboeSynthesizer
+
+class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
+    private val MAX_SYNTH_VOICES = 8
+
+    // Allocation maps used when receiving on Standard MIDI channel (0):
+    // note -> voice index, voice -> note
+    private val noteToVoice = IntArray(128) { -1 }
+    private val voiceToNote = IntArray(MAX_SYNTH_VOICES) { -1 }
+    private val voiceActive = BooleanArray(MAX_SYNTH_VOICES) { false }
+    private var nextAlloc = 0
+
+    private fun mapChannelToSynth(channel: Int): Int {
+        // MIDI uses 0-based internal channel numbers, but humans refer to channels 1..16.
+        // Our synth engine expects channels 0..7 for 8-voice polyphony; map human 1..8 -> 0..7.
+        return when (channel) {
+            in 1..MAX_SYNTH_VOICES -> channel - 1
+            else -> channel
+        }
+    }
+
+    override fun send3(status: Int, data1: Int, data2: Int) {
+        val command = status and 0xF0
+        val channel = status and 0x0F
+
+        // If Standard MIDI (channel 0), perform internal allocation for polyphony.
+        if (channel == 0) {
+            when (command) {
+                0x80 -> { // Note Off
+                    val note = data1
+                    val v = noteToVoice.getOrNull(note) ?: -1
+                    if (v != -1) {
+                        synth.noteOff(v, note)
+                        noteToVoice[note] = -1
+                        voiceToNote[v] = -1
+                        voiceActive[v] = false
+                    }
+                }
+                0x90 -> { // Note On
+                    val note = data1
+                    val vel = data2
+                    if (vel == 0) {
+                        // NoteOn with zero velocity -> NoteOff
+                        val v = noteToVoice.getOrNull(note) ?: -1
+                        if (v != -1) {
+                            synth.noteOff(v, note)
+                            noteToVoice[note] = -1
+                            voiceToNote[v] = -1
+                            voiceActive[v] = false
+                        }
+                        return
+                    }
+
+                    // If this note already has a voice, retrigger it
+                    var v = noteToVoice.getOrNull(note) ?: -1
+                    if (v == -1) {
+                        // Find free voice
+                        var found = -1
+                        for (i in 0 until MAX_SYNTH_VOICES) {
+                            val idx = (nextAlloc + i) % MAX_SYNTH_VOICES
+                            if (!voiceActive[idx]) {
+                                found = idx
+                                break
+                            }
+                        }
+                        if (found == -1) {
+                            // Steal nextAlloc
+                            found = nextAlloc
+                            // If it had a note, turn it off and clear mapping
+                            val oldNote = voiceToNote[found]
+                            if (oldNote != -1) {
+                                synth.noteOff(found, oldNote)
+                                noteToVoice[oldNote] = -1
+                            }
+                        }
+                        v = found
+                        voiceActive[v] = true
+                        voiceToNote[v] = note
+                        noteToVoice[note] = v
+                        nextAlloc = (v + 1) % MAX_SYNTH_VOICES
+                    }
+                    synth.noteOn(v, note, vel)
+                }
+                0xB0 -> { // CC
+                    val cc = data1
+                    val value = data2
+                    if (cc == 71) {
+                        // CC71 -> filter cutoff for all voices
+                        val vNorm = value / 127.0
+                        val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+                        for (i in 0 until MAX_SYNTH_VOICES) {
+                            synth.setFilterCutoff(i, cutoff)
+                        }
+                    } else {
+                        // Forward other CCs to all voices
+                        for (i in 0 until MAX_SYNTH_VOICES) {
+                            synth.controlChange(i, cc, value)
+                        }
+                    }
+                }
+                0xE0 -> { // Pitch Bend
+                    val bend14 = (data2 shl 7) or data1
+                    for (i in 0 until MAX_SYNTH_VOICES) {
+                        synth.pitchBend(i, bend14)
+                    }
+                }
+            }
+            return
+        }
+
+        // MPE / explicit channel mapping
+        val synthChannel = mapChannelToSynth(channel)
+        when (command) {
+            0x80 -> synth.noteOff(synthChannel, data1)
+            0x90 -> {
+                if (data2 == 0) {
+                    synth.noteOff(synthChannel, data1)
+                } else {
+                    synth.noteOn(synthChannel, data1, data2)
+                }
+            }
+            0xB0 -> {
+                // CC mappings: CC71 -> Filter Cutoff (Hz), CC74 -> brightness already forwarded
+                val cc = data1
+                val value = data2
+                if (cc == 71) {
+                    // Map 0..127 -> 20Hz..12000Hz exponentially
+                    val vNorm = value / 127.0
+                    val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+                    synth.setFilterCutoff(synthChannel, cutoff)
+                } else {
+                    synth.controlChange(synthChannel, data1, data2)
+                }
+            }
+            0xE0 -> {
+                val bend14 = (data2 shl 7) or data1
+                synth.pitchBend(synthChannel, bend14)
+            }
+        }
+    }
+
+    override fun send2(status: Int, data1: Int) {
+        val command = status and 0xF0
+        val channel = status and 0x0F
+
+        if (channel == 0) {
+            if (command == 0xD0) {
+                // Channel pressure -> apply to all voices
+                for (i in 0 until MAX_SYNTH_VOICES) {
+                    synth.channelPressure(i, data1)
+                }
+            }
+            return
+        }
+
+        val synthChannel = mapChannelToSynth(channel)
+        if (command == 0xD0) {
+            synth.channelPressure(synthChannel, data1)
+        }
+    }
+
+    override fun close() {
+        // Clear alloc maps
+        for (n in 0 until noteToVoice.size) noteToVoice[n] = -1
+        for (i in 0 until MAX_SYNTH_VOICES) {
+            voiceToNote[i] = -1
+            voiceActive[i] = false
+        }
+        synth.close()
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\OneEuroFilter.kt
+
+package com.breathinghand.core
+
+import kotlin.math.PI
+import kotlin.math.abs
+
+class OneEuroFilter(
+    private val minCutoff: Float = InputTuning.FILTER_MIN_CUTOFF,
+    private val beta: Float = InputTuning.FILTER_BETA,
+    private val dCutoff: Float = 1.0f
+) {
+    // Zero-allocation: no boxed Floats in the hot path.
+    private var hasPrev = false
+    private var xPrev = 0f
+    private var dxPrev = 0f
+    private var tPrev = 0f
+
+    fun reset() {
+        hasPrev = false
+        xPrev = 0f
+        dxPrev = 0f
+        tPrev = 0f
+    }
+
+    fun filter(x: Float, t: Float): Float {
+        if (!hasPrev) {
+            hasPrev = true
+            tPrev = t
+            xPrev = x
+            dxPrev = 0f
+            return x
+        }
+
+        val dt = t - tPrev
+        if (dt <= 0f) return xPrev
+
+        val alphaD = smoothingFactor(dt, dCutoff)
+        val dx = (x - xPrev) / dt
+        val dxHat = exponentialSmoothing(alphaD, dx, dxPrev)
+
+        val cutoff = minCutoff + beta * abs(dxHat)
+        val alpha = smoothingFactor(dt, cutoff)
+        val xHat = exponentialSmoothing(alpha, x, xPrev)
+
+        xPrev = xHat
+        dxPrev = dxHat
+        tPrev = t
+        return xHat
+    }
+
+    private fun smoothingFactor(dt: Float, cutoff: Float): Float {
+        val r = 2 * PI * cutoff * dt
+        return (r / (r + 1)).toFloat()
+    }
+
+    private fun exponentialSmoothing(alpha: Float, current: Float, previous: Float): Float {
+        return alpha * current + (1 - alpha) * previous
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\core\SmartInputHAL.kt
+
+
+
+@file:Suppress("NOTHING_TO_INLINE")
+
+package com.breathinghand.core
+import android.os.SystemClock
+import android.view.MotionEvent
+import kotlin.math.abs
+import kotlin.math.pow
+
+/**
+ * SmartInputHAL
+ *
+ * Zero-allocation Hardware Abstraction Layer for "Musical Force" (0..1).
+ *
+ * Goals:
+ * - Normalize Android fragmentation (Pressure vs Size) into a stable force signal
+ * - Calibrate sensor mode via variance (online, no buffers)
+ * - Smooth jitter without killing attack (bypass smoothing on DOWN)
+ * - Provide "wack" (percussive slap) detection using size spike + motion spike
+ *
+ * Designed to integrate with a strict-slotting pointer system (e.g., max 5 fingers).
+ *
+ * Usage (typical):
+ *  - On each MotionEvent: hal.ingest(event)
+ *  - Then your engine reads hal.activeCount, and per-slot arrays:
+ *      hal.slotPointerId[s], hal.x[s], hal.y[s], hal.force[s], hal.flags[s]
+ *
+ * Note: This class does NOT allocate during ingest().
+ */
+class SmartInputHAL(
+    private val maxSlots: Int = 5,
+    private val cfg: Config = Config()
+) {
+    // --- Public output arrays (read-only by convention) ---
+    val slotPointerId = IntArray(maxSlots) { INVALID_ID }     // pointerId for each slot, or -1
+    val x = FloatArray(maxSlots)
+    val y = FloatArray(maxSlots)
+    val force = FloatArray(maxSlots)                          // 0..1
+    val rawPressure = FloatArray(maxSlots)
+    val rawSize = FloatArray(maxSlots)
+    val flags = IntArray(maxSlots)                            // bitmask
+    var activeCount: Int = 0
+        private set
+
+    // Expansion metric input (optional): set from your Spatial engine each frame (0..1).
+    // If you don’t have it yet, leave as 0f (no compensation).
+    var expansion01: Float = 0f
+
+    // --- Modes ---
+    enum class SensorMode { CALIBRATING, USE_PRESSURE, USE_SIZE, FALLBACK }
+    var mode: SensorMode = SensorMode.CALIBRATING
+        private set
+
+    // --- Private per-slot state ---
+    private val smoothedForce = FloatArray(maxSlots)
+    private val lastX = FloatArray(maxSlots)
+    private val lastY = FloatArray(maxSlots)
+    private val lastTms = LongArray(maxSlots)
+    private val lastSize = FloatArray(maxSlots)
+    private val lastDownTms = LongArray(maxSlots)
+
+    // --- Calibration (online variance via Welford) ---
+    private var calStartedTms: Long = 0L
+    private var calCount: Int = 0
+    private val pStats = OnlineVariance()
+    private val sStats = OnlineVariance()
+    private var calPointerId: Int = INVALID_ID
+
+    // --- Action scratch (no allocations) ---
+    private var lastActionMasked: Int = -1
+    private var lastActionIndex: Int = -1
+
+    data class Config(
+        // Calibration window
+        val calibrationMinSamples: Int = 40,
+        val calibrationMaxSamples: Int = 90,
+        val calibrationMaxMillis: Long = 900L,
+
+        // Mode selection thresholds (variance)
+        val pressureVarThreshold: Float = 0.0010f,
+        val sizeVarThreshold: Float = 0.0010f,
+
+        // Smoothing: y += alpha * (x - y)
+        // alpha closer to 1.0 = less smoothing (more raw), closer to 0 = more smoothing (lag)
+        val alphaMove: Float = 0.55f,
+
+        // Size->force mapping range (tune per device family)
+        val sizeMin: Float = 0.04f,
+        val sizeMax: Float = 0.25f,
+        val sizeCurvePow: Float = 2.0f,
+
+        // Pressure normalization (many devices already 0..1-ish, but some are tiny)
+        // We map: pressureNorm = clamp((p - pMin) / (pMax - pMin), 0..1)
+        val pressureMin: Float = 0.02f,
+        val pressureMax: Float = 0.60f,
+        val pressureCurvePow: Float = 1.0f,
+
+        // Wack detection
+        // Wack if: size spike AND motion spike within early-down window
+        val wackEarlyWindowMs: Long = 35L,
+        val wackSizeSpike: Float = 0.08f,          // rawSize delta vs lastSize
+        val wackSizeAbsolute: Float = 0.22f,       // rawSize must be at least this
+        val wackMotionPx: Float = 18f,             // move between samples (px) (device dependent!)
+        val wackForceMin: Float = 0.25f,           // avoid wack on feather taps
+
+        // Expansion compensation (optional)
+        // corrected = force * (1 + k * expansion^gamma)
+        val expansionCompK: Float = 0.18f,
+        val expansionCompGamma: Float = 1.6f
+    )
+
+    companion object {
+        // Use TouchFrame.INVALID_ID to avoid duplication
+        const val INVALID_ID = TouchFrame.INVALID_ID
+
+        // Use TouchFrame flag constants to avoid duplication
+        // TouchFrame.F_DOWN, TouchFrame.F_UP, TouchFrame.F_WACK, TouchFrame.F_PRIMARY
+
+        private inline fun clamp01(v: Float): Float = when {
+            v < 0f -> 0f
+            v > 1f -> 1f
+            else -> v
+        }
+    }
+
+    /**
+     * Main entry: ingest raw MotionEvent, update per-slot arrays.
+     * Returns activeCount for convenience.
+     *
+     * Zero allocations.
+     */
+    fun ingest(ev: MotionEvent): Int {
+        lastActionMasked = ev.actionMasked
+        lastActionIndex = ev.actionIndex
+
+        // Clear per-frame flags
+        for (s in 0 until maxSlots) flags[s] = 0
+
+        // Calibration step (cheap) using primary pointer only
+        if (mode == SensorMode.CALIBRATING) {
+            runCalibration(ev)
+        }
+
+        // Update all pointers present in this event
+        activeCount = 0
+        val now = SystemClock.uptimeMillis()
+
+        for (i in 0 until ev.pointerCount) {
+            val pid = ev.getPointerId(i)
+            val slot = ensureSlot(pid) ?: continue
+
+            val px = ev.getX(i)
+            val py = ev.getY(i)
+            val p = ev.getPressure(i)
+            val s = ev.getSize(i)
+
+            x[slot] = px
+            y[slot] = py
+            rawPressure[slot] = p
+            rawSize[slot] = s
+
+            val isDownForThisPointer =
+                (lastActionMasked == MotionEvent.ACTION_DOWN && i == 0) ||
+                        (lastActionMasked == MotionEvent.ACTION_POINTER_DOWN && i == lastActionIndex)
+
+            val isUpForThisPointer =
+                (lastActionMasked == MotionEvent.ACTION_UP && i == 0) ||
+                        (lastActionMasked == MotionEvent.ACTION_POINTER_UP && i == lastActionIndex) ||
+                        (lastActionMasked == MotionEvent.ACTION_CANCEL)
+
+            if (isDownForThisPointer) {
+                flags[slot] = flags[slot] or TouchFrame.F_DOWN
+                lastDownTms[slot] = now
+                // Reset smoothing memory for fast attack
+                smoothedForce[slot] = 0f
+                lastX[slot] = px
+                lastY[slot] = py
+                lastTms[slot] = now
+                lastSize[slot] = s
+            }
+            if (isUpForThisPointer) {
+                flags[slot] = flags[slot] or TouchFrame.F_UP
+            }
+
+            // Compute raw force (0..1) by mode
+            val rawF = when (mode) {
+                SensorMode.USE_PRESSURE -> mapPressureToForce(p)
+                SensorMode.USE_SIZE -> mapSizeToForce(s)
+                SensorMode.FALLBACK -> fallbackForce(p, s, slot, now) // still uses size/pressure + motion
+                SensorMode.CALIBRATING -> mapSizeToForce(s) // default behavior during calibration
+            }
+
+            // Optional: compensate for expansion-induced contact changes
+            val compF = applyExpansionCompensation(rawF)
+
+            // Smooth jitter except on DOWN (instant attack)
+            val cleanF = if (isDownForThisPointer) {
+                compF
+            } else {
+                // LPF: y += alpha * (x - y)
+                val prev = smoothedForce[slot]
+                val next = prev + cfg.alphaMove * (compF - prev)
+                next
+            }
+
+            smoothedForce[slot] = cleanF
+            force[slot] = clamp01(cleanF)
+
+            // Wack detection: within early window after down, if size spike + motion spike
+            if (!isUpForThisPointer) {
+                if (detectWack(slot, now, px, py, s, force[slot])) {
+                    flags[slot] = flags[slot] or TouchFrame.F_WACK
+                }
+            }
+
+            // Primary flag (slot 0 is often “primary” in strict slotting, but don’t assume)
+            if (slot == 0) flags[slot] = flags[slot] or TouchFrame.F_PRIMARY
+
+            // Update motion trackers
+            lastX[slot] = px
+            lastY[slot] = py
+            lastSize[slot] = s
+            lastTms[slot] = now
+
+            activeCount++
+        }
+
+        // Handle pointer-up cleanup (remove only the lifted pointer)
+        if (lastActionMasked == MotionEvent.ACTION_UP ||
+            lastActionMasked == MotionEvent.ACTION_POINTER_UP ||
+            lastActionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            val pid = if (lastActionMasked == MotionEvent.ACTION_CANCEL) INVALID_ID else ev.getPointerId(lastActionIndex)
+            if (pid != INVALID_ID) releasePointer(pid)
+            if (lastActionMasked == MotionEvent.ACTION_CANCEL) resetAll()
+        }
+
+        return activeCount
+    }
+
+    /** Call if you want to hard reset calibration + slots (e.g., from a debug button). */
+    fun resetAll() {
+        for (s in 0 until maxSlots) {
+            slotPointerId[s] = INVALID_ID
+            x[s] = 0f; y[s] = 0f
+            force[s] = 0f
+            rawPressure[s] = 0f
+            rawSize[s] = 0f
+            smoothedForce[s] = 0f
+            lastX[s] = 0f; lastY[s] = 0f
+            lastTms[s] = 0L
+            lastSize[s] = 0f
+            lastDownTms[s] = 0L
+            flags[s] = 0
+        }
+        activeCount = 0
+        mode = SensorMode.CALIBRATING
+        calStartedTms = 0L
+        calCount = 0
+        pStats.reset()
+        sStats.reset()
+        calPointerId = INVALID_ID
+    }
+
+    // -----------------------
+    // Calibration
+    // -----------------------
+
+    private fun runCalibration(ev: MotionEvent) {
+        val now = SystemClock.uptimeMillis()
+        if (calStartedTms == 0L) calStartedTms = now
+
+        // Choose calibration pointer: first DOWN pointer id
+        if (calPointerId == INVALID_ID) {
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+                calPointerId = ev.getPointerId(0)
+            } else {
+                // If we missed ACTION_DOWN, just use pointer 0 for now until we see down
+                calPointerId = ev.getPointerId(0)
+            }
+        }
+
+        // Locate calibration pointer index
+        val idx = findPointerIndex(ev, calPointerId)
+        if (idx < 0) return
+
+        // Sample
+        val p = ev.getPressure(idx)
+        val s = ev.getSize(idx)
+        pStats.push(p.toDouble())
+        sStats.push(s.toDouble())
+        calCount++
+
+        val elapsed = now - calStartedTms
+        val shouldFinalize =
+            (calCount >= cfg.calibrationMinSamples && elapsed >= cfg.calibrationMaxMillis / 2) ||
+                    (calCount >= cfg.calibrationMaxSamples) ||
+                    (elapsed >= cfg.calibrationMaxMillis)
+
+        if (shouldFinalize) finalizeCalibration()
+    }
+
+    private fun finalizeCalibration() {
+        val pVar = pStats.variance().toFloat()
+        val sVar = sStats.variance().toFloat()
+
+        mode = when {
+            pVar > cfg.pressureVarThreshold -> SensorMode.USE_PRESSURE
+            sVar > cfg.sizeVarThreshold -> SensorMode.USE_SIZE
+            else -> SensorMode.FALLBACK
+        }
+
+        // Reset calibration counters but keep mode
+        calStartedTms = 0L
+        calCount = 0
+        pStats.reset()
+        sStats.reset()
+        calPointerId = INVALID_ID
+
+        // You probably want Android Log.d in your app; println is OK for quick debugging.
+        println("SmartInputHAL: Mode=$mode (pVar=$pVar, sVar=$sVar)")
+    }
+
+    // -----------------------
+    // Slot management (strict slotting)
+    // -----------------------
+
+    private fun ensureSlot(pointerId: Int): Int? {
+        // Already assigned?
+        for (s in 0 until maxSlots) {
+            if (slotPointerId[s] == pointerId) return s
+        }
+        // Free slot?
+        for (s in 0 until maxSlots) {
+            if (slotPointerId[s] == INVALID_ID) {
+                slotPointerId[s] = pointerId
+                return s
+            }
+        }
+        return null // no slot available
+    }
+
+    private fun releasePointer(pointerId: Int) {
+        for (s in 0 until maxSlots) {
+            if (slotPointerId[s] == pointerId) {
+                slotPointerId[s] = INVALID_ID
+                force[s] = 0f
+                smoothedForce[s] = 0f
+                rawPressure[s] = 0f
+                rawSize[s] = 0f
+                // Don't clear flags here - F_UP must survive until MainActivity reads frame
+                // Flags are cleared at the start of next ingest() call anyway
+                return
+            }
+        }
+    }
+
+    private fun findPointerIndex(ev: MotionEvent, pointerId: Int): Int {
+        for (i in 0 until ev.pointerCount) {
+            if (ev.getPointerId(i) == pointerId) return i
+        }
+        return -1
+    }
+
+    // -----------------------
+    // Force mapping
+    // -----------------------
+
+    private fun mapSizeToForce(rawS: Float): Float {
+        // Normalize to 0..1 within [sizeMin, sizeMax]
+        val n = (rawS - cfg.sizeMin) / (cfg.sizeMax - cfg.sizeMin)
+        val clamped = clamp01(n)
+        val pow = cfg.sizeCurvePow
+        return if (pow == 1f) clamped else clamped.pow(pow)
+    }
+
+    private fun mapPressureToForce(rawP: Float): Float {
+        val n = (rawP - cfg.pressureMin) / (cfg.pressureMax - cfg.pressureMin)
+        val clamped = clamp01(n)
+        val pow = cfg.pressureCurvePow
+        return if (pow == 1f) clamped else clamped.pow(pow)
+    }
+
+    private fun fallbackForce(rawP: Float, rawS: Float, slot: Int, now: Long): Float {
+        // Conservative fallback: combine best guesses
+        // - size mapping provides "squish"
+        // - pressure mapping may still have tiny useful variation
+        // - motion adds “impact” for percussive gestures
+        val sizeF = mapSizeToForce(rawS)
+        val pressF = mapPressureToForce(rawP)
+
+        val dt = (now - lastTms[slot]).coerceAtLeast(1L).toFloat()
+        val dx = x[slot] - lastX[slot]
+        val dy = y[slot] - lastY[slot]
+        val motion = (abs(dx) + abs(dy)) / dt // px/ms (Manhattan, cheap)
+        val impact = clamp01(motion * 0.9f)   // tune factor if needed
+
+        // Weighted blend, biased towards size
+        return clamp01(sizeF * 0.70f + pressF * 0.20f + impact * 0.10f)
+    }
+
+    private fun applyExpansionCompensation(f: Float): Float {
+        val e = clamp01(expansion01)
+        if (e <= 0f) return f
+        val gain = 1f + cfg.expansionCompK * e.pow(cfg.expansionCompGamma)
+        return clamp01(f * gain)
+    }
+
+    // -----------------------
+    // Wack detection
+    // -----------------------
+
+    private fun detectWack(slot: Int, now: Long, px: Float, py: Float, sizeNow: Float, forceNow: Float): Boolean {
+        val sinceDown = now - lastDownTms[slot]
+        if (sinceDown < 0L || sinceDown > cfg.wackEarlyWindowMs) return false
+
+        val sizeDelta = sizeNow - lastSize[slot]
+        if (sizeNow < cfg.wackSizeAbsolute) return false
+        if (sizeDelta < cfg.wackSizeSpike) return false
+        if (forceNow < cfg.wackForceMin) return false
+
+        // Motion spike: distance since last sample
+        val dx = px - lastX[slot]
+        val dy = py - lastY[slot]
+        val manhattan = abs(dx) + abs(dy)
+        return manhattan >= cfg.wackMotionPx
+    }
+
+    // -----------------------
+    // Online variance (Welford)
+    // -----------------------
+
+    private class OnlineVariance {
+        private var n = 0
+        private var mean = 0.0
+        private var m2 = 0.0
+
+        fun reset() {
+            n = 0
+            mean = 0.0
+            m2 = 0.0
+        }
+
+        fun push(x: Double) {
+            n++
+            val delta = x - mean
+            mean += delta / n
+            val delta2 = x - mean
+            m2 += delta * delta2
+        }
+
+        fun variance(): Double {
+            return if (n < 2) 0.0 else (m2 / (n - 1))
+        }
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\MainActivity.kt
+
+package com.breathinghand
+
+import android.media.midi.MidiManager
+import android.os.Bundle
+import android.os.SystemClock
+import android.util.Log
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.Switch
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import com.breathinghand.audio.OboeSynthesizer
+import com.breathinghand.core.*
+import com.breathinghand.core.midi.AndroidForensicLogger
+import com.breathinghand.core.midi.AndroidMonotonicClock
+import com.breathinghand.core.midi.AndroidMidiSink
+import com.breathinghand.core.midi.FanOutMidiSink
+import com.breathinghand.core.midi.MidiOut
+import com.breathinghand.core.midi.OboeMidiSink
+import java.io.IOException
+import kotlinx.coroutines.*
+
+class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG_SEM = "BH_SEM"
+    }
+
+    private val touchState = MutableTouchPolar()
+    private val radiusFilter = OneEuroFilter()
+
+    private lateinit var harmonicEngine: HarmonicEngine
+    private lateinit var gestureAnalyzer: GestureAnalyzerV01
+    private lateinit var timbreNav: TimbreNavigator
+    private val transitionWindow = TransitionWindow()
+
+    private var r1Px: Float = 0f
+    private var r2Px: Float = 0f
+    private val startTime = System.nanoTime()
+
+    @Volatile
+    private var voiceLeader: VoiceLeader? = null
+
+    // We keep a reference to the raw MIDI transport so we can swap modes without reconnecting
+    private var activeMidiOut: MidiOut? = null
+    private lateinit var internalSynth: OboeSynthesizer
+    private lateinit var midiFanOut: FanOutMidiSink
+    private var externalMidiSink: AndroidMidiSink? = null
+
+    private lateinit var overlay: HarmonicOverlayView
+    private lateinit var mpeSwitch: Switch // The new Tick Box
+
+    // Activity result launcher for picking a single audio file (WAV) — simple custom wavetable
+    private val pickWavLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { loadWavetableUri(it) }
+    }
+
+    // Activity result launcher for mapped samples (asks for mapping metadata)
+    private val pickMappedSampleLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { showMappedSampleDialog(it) }
+    }
+
+    // SFZ file picker
+    private val pickSfzLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onSfzPicked(it) }
+    }
+
+    // Pick a folder that contains sample files (OpenDocumentTree)
+    private val pickSfzFolderLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        uri?.let { onSfzFolderPicked(it) }
+    }
+
+    // Pick individual missing sample file
+    private val pickSingleSampleLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onSingleSamplePicked(it) }
+    }
+
+    private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
+    private val touchDriver = AndroidTouchDriver(maxSlots = MusicalConstants.MAX_VOICES)
+    private val touchFrame: TouchFrame
+        get() = touchDriver.frame
+
+    private val gestureContainer = TimbreNavigator.MutableGesture()
+    private var lastPointerCount = 0
+
+    // Last non-zero centroid (used to arm Transition Window on lift-to-zero)
+    private var lastActiveCenterX = 0f
+    private var lastActiveCenterY = 0f
+
+    // Visual change detection
+    private var lastDrawnSector = -1
+    private var lastDrawnPc = -1
+    private var lastDrawnFc = -1
+    private var lastDrawnUnstable = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        MidiOut.FORENSIC_TX_LOG = MusicalConstants.IS_DEBUG
+
+        val density = resources.displayMetrics.density
+        r1Px = MusicalConstants.BASE_RADIUS_INNER * density
+        r2Px = MusicalConstants.BASE_RADIUS_OUTER * density
+
+        gestureAnalyzer = GestureAnalyzerV01(r1Px, r2Px)
+        harmonicEngine = HarmonicEngine()
+        timbreNav = TimbreNavigator(
+            maxPointerId = MusicalConstants.MAX_POINTER_ID,
+            deadzonePx = 6f * density,
+            rangeXPx = 220f * density,
+            rangeYPx = 220f * density
+        )
+
+        internalSynth = OboeSynthesizer()
+        midiFanOut = FanOutMidiSink(OboeMidiSink(internalSynth))
+        activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
+
+        // --- NEW UI SETUP ---
+        setupUI()
+        updateMidiMode(mpeSwitch.isChecked)
+
+        setupMidi()
+    }
+
+    /**
+     * Programmatically creates a FrameLayout with the Instrument on bottom
+     * and the Configuration Switch on top.
+     */
+    private fun setupUI() {
+        // 1. The Container
+        val container = FrameLayout(this)
+        container.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+
+        // 2. The Instrument View (Bottom Layer)
+        overlay = HarmonicOverlayView(this, harmonicEngine)
+        overlay.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        container.addView(overlay)
+
+        // 3. The MPE Switch (Top Layer)
+        mpeSwitch = Switch(this)
+        mpeSwitch.text = "MPE Mode   "
+        mpeSwitch.textSize = 14f
+        mpeSwitch.setTextColor(-1) // White text
+        mpeSwitch.isChecked = true // Default to MPE (enable internal synth polyphony)
+
+        // Position: Top Right
+        val params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        params.gravity = Gravity.TOP or Gravity.END
+        params.setMargins(0, 48, 48, 0) // Margin for status bar
+        mpeSwitch.layoutParams = params
+
+        // 4. Handle Mode Switching
+        mpeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateMidiMode(isChecked)
+            val modeName = if (isChecked) "MPE (Multi-Ch)" else "Standard (Ch 1)"
+            Toast.makeText(this, "Mode: $modeName", Toast.LENGTH_SHORT).show()
+        }
+
+        // Long-press the switch to pick a custom wavetable (.wav). Uses a DirectByteBuffer and hands it to native code.
+        mpeSwitch.setOnLongClickListener {
+            pickWavLauncher.launch(arrayOf("audio/wav", "audio/*"))
+            Toast.makeText(this, "Pick a .wav to load as wavetable", Toast.LENGTH_SHORT).show()
+            true
+        }
+
+        container.addView(mpeSwitch)
+
+        // Controls overlay (floating)
+        val controlsOverlay = ControlsOverlayView(this, internalSynth)
+        val controlsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        controlsParams.gravity = Gravity.BOTTOM or Gravity.END
+        controlsParams.setMargins(48, 48, 48, 48)
+        controlsOverlay.layoutParams = controlsParams
+        container.addView(controlsOverlay)
+
+        // Mapped sample picker (from controls overlay)
+        controlsOverlay.onLoadMappedSample = {
+            pickMappedSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
+        }
+
+        // SFZ importer (from controls overlay)
+        controlsOverlay.onImportSfz = {
+            pickSfzLauncher.launch(arrayOf("*/*"))
+        }
+
+        // Manage samples (from controls overlay)
+        controlsOverlay.onManageSamples = {
+            showManageSamplesDialog()
+        }
+
+        // Set the container as the activity content
+        setContentView(container)
+    }
+
+    private fun showManageSamplesDialog() {
+        val names = internalSynth.getLoadedSampleNames()
+        if (names.isEmpty()) {
+            Toast.makeText(this, "No samples loaded", Toast.LENGTH_SHORT).show()
+            return
+        }
+        var selectedIndex = 0
+        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
+        builder.setTitle("Loaded Samples")
+        builder.setSingleChoiceItems(names, selectedIndex) { _, which ->
+            selectedIndex = which
+        }
+        builder.setPositiveButton("Unload") { _, _ ->
+            val name = names.getOrNull(selectedIndex) ?: return@setPositiveButton
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Unload Sample")
+                .setMessage("Unload '$name'? This will remove its mappings.")
+                .setPositiveButton("Yes") { _, _ ->
+                    internalSynth.unloadSample(selectedIndex)
+                    Toast.makeText(this, "Unloaded $name", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        builder.setNegativeButton("Close", null)
+        builder.show()
+    }
+
+
+    /**
+     * Swaps the VoiceLeader strategy without breaking the USB connection.
+     */
+    private fun updateMidiMode(useMpe: Boolean) {
+        val midi = activeMidiOut ?: return // Can't update if not connected
+
+        // 1. Silence current notes
+        voiceLeader?.allNotesOff()
+
+        // 2. Choose Strategy
+        val output: MidiOutput = if (useMpe) {
+            MpeMidiOutput(midi)
+        } else {
+            StandardMidiOutput(midi)
+        }
+
+        // 3. Replace VoiceLeader
+        voiceLeader = VoiceLeader(output)
+    }
+
+    private fun latchAttackVelocitiesFromFrame() {
+        for (s in 0 until MusicalConstants.MAX_VOICES) {
+            val flags = touchFrame.flags[s]
+            if ((flags and TouchFrame.F_DOWN) == 0) continue
+
+            val pid = touchFrame.pointerIds[s]
+            if (pid != TouchFrame.INVALID_ID) {
+                var v = (1 + (touchFrame.force01[s] * 126f)).toInt().coerceIn(1, 127)
+                if ((flags and TouchFrame.F_WACK) != 0) {
+                    v = (v + 20).coerceIn(1, 127)
+                }
+                voiceLeader?.setSlotVelocity(s, pid, v)
+            }
+        }
+    }
+
+    // Read content from the URI into a DirectByteBuffer and pass it to the native engine
+    private fun loadWavetableUri(uri: android.net.Uri) {
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                bb.put(bytes)
+                bb.rewind()
+
+                // Hand the DirectByteBuffer to the native side via the OboeSynthesizer wrapper
+                internalSynth.loadWavetableFromByteBuffer(bb)
+                Toast.makeText(this, "Loaded wavetable (${bytes.size} bytes)", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: java.io.IOException) {
+            Toast.makeText(this, "Failed to load wavetable: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val importScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+
+    private fun showMappedSampleDialog(uri: android.net.Uri) {
+        // Dialog to ask for root, lo, hi (simple numeric inputs)
+        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
+        builder.setTitle("Sample Mapping")
+        val layout = android.widget.LinearLayout(this)
+        layout.orientation = android.widget.LinearLayout.VERTICAL
+        val rootInput = android.widget.EditText(this)
+        rootInput.hint = "Root MIDI note (0..127)"
+        rootInput.setText("60")
+        val loInput = android.widget.EditText(this)
+        loInput.hint = "Low key (0..127)"
+        loInput.setText("0")
+        val hiInput = android.widget.EditText(this)
+        hiInput.hint = "High key (0..127)"
+        hiInput.setText("127")
+        layout.setPadding(24, 12, 24, 12)
+        layout.addView(rootInput)
+        layout.addView(loInput)
+        layout.addView(hiInput)
+        builder.setView(layout)
+        builder.setPositiveButton("Register") { _, _ ->
+            val root = rootInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 60
+            val lo = loInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 0
+            val hi = hiInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 127
+
+            // Run decode/register on IO scope so we don't block main thread
+            importScope.launch {
+                try {
+                    val mime = contentResolver.getType(uri) ?: ""
+                    val wavBytes: ByteArray? = if (mime.contains("wav") || uri.path?.endsWith(".wav", ignoreCase = true) == true) {
+                        // Read raw wav bytes directly
+                        contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    } else {
+                        // Attempt to decode compressed audio to WAV
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Decoding sample...", Toast.LENGTH_SHORT).show() }
+                        com.breathinghand.audio.AudioDecoder.decodeToWavBytes(this@MainActivity, uri)
+                    }
+
+                    if (wavBytes == null) {
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Failed to decode sample (unsupported format)", Toast.LENGTH_LONG).show() }
+                        return@launch
+                    }
+
+                    val bb = java.nio.ByteBuffer.allocateDirect(wavBytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    bb.put(wavBytes)
+                    bb.rewind()
+
+                    val before = internalSynth.getLoadedSampleNames().toSet()
+                    internalSynth.registerSampleFromByteBuffer(bb, root, lo, hi)
+                    val after = internalSynth.getLoadedSampleNames().toSet()
+                    val added = after - before
+                    if (added.isNotEmpty()) {
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show() }
+                    } else {
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Registration attempted but no sample was added (check logs)", Toast.LENGTH_LONG).show() }
+                    }
+
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Failed to register sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show() }
+                }
+            }
+        }
+        builder.setNegativeButton("Cancel", null)
+        builder.show()
+    }
+
+    // --- SFZ Importer helpers ---
+    data class ParsedRegion(val sampleName: String, val root: Int, val lo: Int, val hi: Int)
+
+    private var pendingSfzRegions: List<ParsedRegion>? = null
+    private var pendingSfzMissing: MutableList<String> = mutableListOf()
+    private var pendingSfzMissingIndex = 0
+
+    private fun onSfzPicked(uri: android.net.Uri) {
+        // Parse SFZ file for regions; then ask user to pick a folder containing samples
+        try {
+            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+            val regions = mutableListOf<ParsedRegion>()
+            text.lines().forEach { raw ->
+                val line = raw.trim()
+                if (line.isEmpty()) return@forEach
+                if (!line.contains("sample=")) return@forEach
+                // Tokenize by whitespace
+                val tokens = line.split(Regex("\\s+"))
+                var sampleName: String? = null
+                var lokey: Int? = null
+                var hikey: Int? = null
+                var root: Int? = null
+                for (t in tokens) {
+                    if (t.startsWith("sample=")) sampleName = t.substringAfter("=")
+                    if (t.startsWith("lokey=")) lokey = parseSfzKey(t.substringAfter("="))
+                    if (t.startsWith("hikey=")) hikey = parseSfzKey(t.substringAfter("="))
+                    if (t.startsWith("pitch_keycenter=") || t.startsWith("key=") || t.startsWith("pitch_keycenter")) {
+                        val v = t.substringAfter("=")
+                        root = parseSfzKey(v)
+                    }
+                }
+                if (sampleName != null) {
+                    val lo = lokey ?: 0
+                    val hi = hikey ?: 127
+                    val r = root ?: ((lo + hi) / 2)
+                    regions.add(ParsedRegion(sampleName, r, lo, hi))
+                }
+            }
+            if (regions.isEmpty()) {
+                Toast.makeText(this, "No regions found in SFZ", Toast.LENGTH_LONG).show()
+                return
+            }
+            pendingSfzRegions = regions
+            // Ask user to pick the folder containing samples
+            Toast.makeText(this, "Select the folder that contains SFZ sample files", Toast.LENGTH_SHORT).show()
+            pickSfzFolderLauncher.launch(null)
+        } catch (e: java.io.IOException) {
+            Toast.makeText(this, "Failed to read SFZ: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun parseSfzKey(s: String): Int? {
+        // Accept integers or note names like c4 or c-1
+        val asInt = s.toIntOrNull()
+        if (asInt != null) return asInt
+        // Parse note name
+        val m = Regex("^([A-Ga-g])([#b]?)(-?\\d+)").find(s)
+        if (m != null) {
+            val note = m.groupValues[1].uppercase()
+            val acc = m.groupValues[2]
+            val oct = m.groupValues[3].toIntOrNull() ?: return null
+            val base = when (note) {
+                "C" -> 0
+                "D" -> 2
+                "E" -> 4
+                "F" -> 5
+                "G" -> 7
+                "A" -> 9
+                "B" -> 11
+                else -> 0
+            }
+            var sem = base
+            if (acc == "#") sem += 1
+            if (acc == "b") sem -= 1
+            val midi = (oct + 1) * 12 + sem
+            return midi.coerceIn(0, 127)
+        }
+        return null
+    }
+
+    private fun onSfzFolderPicked(treeUri: android.net.Uri) {
+        fun getDisplayNameFromDoc(doc: androidx.documentfile.provider.DocumentFile?): String? {
+            if (doc == null) return null
+            return doc.name
+        }
+        val regions = pendingSfzRegions ?: return
+        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, treeUri)
+        val missing = mutableListOf<String>()
+        val before = internalSynth.getLoadedSampleNames().toSet()
+        val decodeJobs = mutableListOf<kotlinx.coroutines.Deferred<Pair<Boolean,String?>>>()
+        for (r in regions) {
+            val name = r.sampleName
+            var doc = tree?.findFile(name)
+            if (doc == null) {
+                // try basename (in case path included)
+                val base = name.substringAfterLast('/')
+                doc = tree?.findFile(base)
+            }
+            if (doc == null) {
+                missing.add(name)
+            } else {
+                // Launch async decode+register per-file
+                val job = importScope.async {
+                    try {
+                        val mime = contentResolver.getType(doc.uri) ?: ""
+                        val wavBytes = if (mime.contains("wav") || (doc.name?.endsWith(".wav", true) == true)) {
+                            contentResolver.openInputStream(doc.uri)?.use { it.readBytes() }
+                        } else {
+                            com.breathinghand.audio.AudioDecoder.decodeToWavBytes(this@MainActivity, doc.uri)
+                        }
+
+                        if (wavBytes == null) {
+                            return@async Pair(false, name)
+                        }
+
+                        val bb = java.nio.ByteBuffer.allocateDirect(wavBytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                        bb.put(wavBytes)
+                        bb.rewind()
+                        val display = getDisplayNameFromDoc(doc) ?: r.sampleName.substringAfterLast('/')
+                        internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, display)
+                        return@async Pair(true, display)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        return@async Pair(false, name)
+                    }
+                }
+                decodeJobs.add(job)
+            }
+        }
+
+        // Launch a background job to await decodes and report results when done
+        importScope.launch {
+            val results = decodeJobs.map { it.await() }
+            val successNames = results.filter { it.first }.mapNotNull { it.second }
+            val failedNames = results.filter { !it.first }.mapNotNull { it.second }
+
+            runOnUiThread {
+                if (failedNames.isNotEmpty()) {
+                    Toast.makeText(this@MainActivity, "${failedNames.size} files failed to import", Toast.LENGTH_LONG).show()
+                }
+                if (successNames.isNotEmpty()) {
+                    Toast.makeText(this@MainActivity, "Imported ${successNames.size} regions from SFZ", Toast.LENGTH_SHORT).show()
+                    pendingSfzRegions = null
+                }
+            }
+        }
+        // Immediately return; background job will update UI when finished
+        Toast.makeText(this, "Importing ${regions.size - missing.size} files...", Toast.LENGTH_SHORT).show()
+        return
+        val after = internalSynth.getLoadedSampleNames().toSet()
+        val added = after - before
+        if (missing.isEmpty() && added.isNotEmpty()) {
+            Toast.makeText(this, "Imported ${regions.size} regions from SFZ", Toast.LENGTH_SHORT).show()
+            pendingSfzRegions = null
+            return
+        }
+        if (missing.isEmpty() && added.isEmpty()) {
+            Toast.makeText(this, "Attempted import but no samples were registered (check logs)", Toast.LENGTH_LONG).show()
+            return
+        }
+        // Need user help to pick missing files
+        pendingSfzMissing = missing.toMutableList()
+        pendingSfzMissingIndex = 0
+        Toast.makeText(this, "${missing.size} files missing; please select them when prompted", Toast.LENGTH_LONG).show()
+        // Launch picker for first missing
+        pickSingleSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
+    }
+
+    private fun onSingleSamplePicked(uri: android.net.Uri) {
+        // Ensure helper for display name exists
+        fun getDisplayNameLocal(u: android.net.Uri): String? {
+            var name: String? = null
+            val cursor = contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) name = it.getString(idx)
+                }
+            }
+            return name
+        }
+        if (pendingSfzMissingIndex >= pendingSfzMissing.size) return
+        val expectedName = pendingSfzMissing[pendingSfzMissingIndex]
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                bb.put(bytes)
+                bb.rewind()
+                // Find regions referencing expectedName and register; fall back to base name
+                val regions = pendingSfzRegions ?: listOf()
+                val base = expectedName.substringAfterLast('/')
+                val name = getDisplayNameLocal(uri) ?: base
+                val before = internalSynth.getLoadedSampleNames().toSet()
+                regions.filter { it.sampleName == expectedName || it.sampleName == base }.forEach { r ->
+                    internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, name)
+                }
+                val after = internalSynth.getLoadedSampleNames().toSet()
+                val added = after - before
+                if (added.isEmpty()) {
+                    Toast.makeText(this, "Selected file registered but no samples were added (check logs)", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: java.io.IOException) {
+            Toast.makeText(this, "Failed to read selected sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+        pendingSfzMissingIndex += 1
+        if (pendingSfzMissingIndex < pendingSfzMissing.size) {
+            pickSingleSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
+        } else {
+            Toast.makeText(this, "Completed mapping missing files", Toast.LENGTH_SHORT).show()
+            pendingSfzRegions = null
+            pendingSfzMissing.clear()
+            pendingSfzMissingIndex = 0
+        }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Pass touch events to the Overlay manually if the Switch doesn't consume them?
+        // Actually, returning false here allows standard dispatch, but since we override onTouchEvent
+        // at the Activity level, we intercept everything not caught by views.
+        // The Switch will handle its own touches. We process the rest for music.
+
+        try {
+            TouchLogger.log(event, overlay.width, overlay.height)
+            touchDriver.ingest(event)
+
+            val cx = overlay.width / 2f
+            val cy = overlay.height / 2f
+            TouchMath.update(touchFrame, cx, cy, touchState)
+
+            val fCount = touchState.pointerCount.coerceIn(0, 4)
+
+            if (fCount > 0) {
+                lastActiveCenterX = touchState.centerX
+                lastActiveCenterY = touchState.centerY
+            }
+
+            val landing = (lastPointerCount == 0 && fCount > 0)
+            val addFinger = (fCount > lastPointerCount)
+            val liftToZero = (fCount == 0 && lastPointerCount > 0)
+
+            var semanticEvent = when {
+                landing -> GestureAnalyzerV01.EVENT_LANDING
+                addFinger -> GestureAnalyzerV01.EVENT_ADD_FINGER
+                else -> GestureAnalyzerV01.EVENT_NONE
+            }
+
+            var transitionHit = false
+            if (landing) {
+                transitionHit = transitionWindow.consumeIfHit(
+                    touchFrame.tMs,
+                    touchState.centerX,
+                    touchState.centerY,
+                    fCount
+                )
+                if (transitionHit) {
+                    harmonicEngine.beginFromRestoredState(
+                        touchFrame.tMs,
+                        transitionWindow.storedState,
+                        touchState.angle
+                    )
+                    gestureAnalyzer.seedFromState(transitionWindow.storedState)
+                    semanticEvent = GestureAnalyzerV01.EVENT_NONE
+                } else {
+                    transitionWindow.disarm()
+                }
+            }
+
+            latchAttackVelocitiesFromFrame()
+
+            for (s in 0 until MusicalConstants.MAX_VOICES) {
+                val pid = touchFrame.pointerIds[s]
+                if (pid == TouchFrame.INVALID_ID) continue
+                val f = touchFrame.flags[s]
+                if ((f and TouchFrame.F_DOWN) != 0) {
+                    timbreNav.onPointerDown(pid, touchFrame.x[s], touchFrame.y[s])
+                }
+                if ((f and TouchFrame.F_UP) != 0) {
+                    timbreNav.onPointerUp(pid)
+                }
+            }
+
+            when (event.actionMasked) {
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (lastPointerCount > 0) {
+                        transitionWindow.arm(
+                            touchFrame.tMs,
+                            lastActiveCenterX,
+                            lastActiveCenterY,
+                            harmonicEngine.state,
+                            lastPointerCount
+                        )
+                    }
+
+                    for (s in 0 until MusicalConstants.MAX_VOICES) {
+                        activePointers[s] = -1
+                    }
+
+                    MidiLogger.logAllNotesOff(
+                        if (event.actionMasked == MotionEvent.ACTION_UP) "ACTION_UP" else "ACTION_CANCEL"
+                    )
+                    voiceLeader?.allNotesOff()
+
+                    harmonicEngine.onAllFingersLift(touchFrame.tMs)
+                    TouchMath.reset()
+                    radiusFilter.reset()
+                    lastPointerCount = 0
+
+                    invalidateIfVisualChanged()
+                    return true
+                }
+            }
+
+            if (liftToZero) {
+                transitionWindow.arm(
+                    touchFrame.tMs,
+                    lastActiveCenterX,
+                    lastActiveCenterY,
+                    harmonicEngine.state,
+                    lastPointerCount
+                )
+                radiusFilter.reset()
+            }
+
+            if (touchState.isActive) {
+                val tSec = (System.nanoTime() - startTime) / 1_000_000_000f
+                val spreadSmooth = radiusFilter.filter(touchState.radius, tSec)
+
+                val expansion01 = ((spreadSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
+                touchDriver.expansion01 = expansion01
+
+                for (s in 0 until MusicalConstants.MAX_VOICES) {
+                    val pid = touchFrame.pointerIds[s]
+                    activePointers[s] = pid
+                }
+
+                for (s in 0 until MusicalConstants.MAX_VOICES) {
+                    val pid = touchFrame.pointerIds[s]
+                    if (pid == TouchFrame.INVALID_ID) continue
+
+                    val force = touchFrame.force01[s]
+                    val at = (force * 127f).toInt()
+                    voiceLeader?.setSlotAftertouch(s, pid, at)
+
+                    val pIndex = event.findPointerIndex(pid)
+                    if (pIndex >= 0) {
+                        val x = event.getX(pIndex)
+                        val y = event.getY(pIndex)
+
+                        if (timbreNav.compute(pid, x, y, gestureContainer)) {
+                            val bend14 = (MusicalConstants.CENTER_PITCH_BEND +
+                                    (gestureContainer.dxNorm * 8191f)).toInt().coerceIn(0, 16383)
+                            voiceLeader?.setSlotPitchBend(s, pid, bend14)
+
+                            val cc74 = (MusicalConstants.CENTER_CC74 +
+                                    (-gestureContainer.dyNorm * 63f)).toInt().coerceIn(0, 127)
+                            voiceLeader?.setSlotCC74(s, pid, cc74)
+                        }
+                    }
+                }
+
+                if (!transitionHit) {
+                    gestureAnalyzer.onSemanticEvent(touchFrame, fCount, spreadSmooth, semanticEvent)
+                }
+
+                if (semanticEvent != GestureAnalyzerV01.EVENT_NONE && MusicalConstants.IS_DEBUG) {
+                    val evtName = if (semanticEvent == GestureAnalyzerV01.EVENT_LANDING) "LAND" else "ADD"
+                    Log.d(
+                        TAG_SEM,
+                        "${touchFrame.tMs},$evtName,f=$fCount,triad=${gestureAnalyzer.latchedTriad},sev=${gestureAnalyzer.latchedSeventh}"
+                    )
+                }
+
+                val centerYNorm =
+                    if (overlay.height > 0) (touchState.centerY / overlay.height.toFloat()) else 0.5f
+
+                val changed = if (!transitionHit) {
+                    harmonicEngine.update(
+                        touchFrame.tMs,
+                        touchState.angle,
+                        spreadSmooth,
+                        centerYNorm,
+                        fCount,
+                        gestureAnalyzer.latchedTriad,
+                        gestureAnalyzer.latchedSeventh
+                    )
+                } else {
+                    false
+                }
+
+                if (changed && MusicalConstants.IS_DEBUG) {
+                    MidiLogger.logHarmony(harmonicEngine.state)
+                }
+
+                voiceLeader?.update(harmonicEngine.state, activePointers)
+                lastPointerCount = fCount
+            } else {
+                lastPointerCount = 0
+            }
+
+            invalidateIfVisualChanged()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return true
+    }
+
+    private fun invalidateIfVisualChanged() {
+        val s = harmonicEngine.state
+        val unstable = s.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD
+
+        val changed =
+            (s.functionSector != lastDrawnSector) ||
+                    (s.rootPc != lastDrawnPc) ||
+                    (s.fingerCount != lastDrawnFc) ||
+                    (unstable != lastDrawnUnstable)
+
+        if (changed) {
+            overlay.invalidate()
+            lastDrawnSector = s.functionSector
+            lastDrawnPc = s.rootPc
+            lastDrawnFc = s.fingerCount
+            lastDrawnUnstable = unstable
+        }
+    }
+
+    private fun setupMidi() {
+        try {
+            val midiManager = getSystemService(MIDI_SERVICE) as? MidiManager ?: return
+            @Suppress("DEPRECATION")
+            val devices = midiManager.devices
+
+            val usbDevice = devices.firstOrNull { it.inputPortCount > 0 }
+            if (usbDevice != null) {
+                midiManager.openDevice(usbDevice, { device ->
+                    if (device != null) {
+                        val port = device.openInputPort(0)
+                        if (port != null) {
+                            externalMidiSink?.close()
+                            externalMidiSink = AndroidMidiSink(port)
+                            midiFanOut.setSecondary(externalMidiSink)
+
+                            runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
+                        } else {
+                            Log.w("MIDI", "Failed to open input port")
+                            try {
+                                device.close()
+                            } catch (e: IOException) {
+                                e.printStackTrace()
+                            }
+                        }
+                    }
+                }, null)
+            }
+        } catch (e: Exception) {
+            Log.e("MIDI", "Setup failed", e)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        internalSynth.stop()
+        MidiLogger.logAllNotesOff("onPause")
+        voiceLeader?.allNotesOff()
+        harmonicEngine.onAllFingersLift(SystemClock.uptimeMillis())
+        TouchMath.reset()
+        radiusFilter.reset()
+        timbreNav.resetAll()
+        lastPointerCount = 0
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        voiceLeader?.close()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        internalSynth.start()
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\MidiLogger.kt
+
+package com.breathinghand
+
+import android.os.SystemClock
+import android.util.Log
+import com.breathinghand.core.HarmonicState
+import com.breathinghand.core.MusicalConstants // Import added
+
+object MidiLogger {
+    private const val TAG = "FORENSIC_DATA"
+
+    // REMOVED: private const val IS_DEBUG = true
+    // LINKED TO SINGLE SOURCE OF TRUTH:
+    private const val ENABLED = MusicalConstants.IS_DEBUG
+
+    fun logHarmony(state: HarmonicState) {
+        if (!ENABLED) return
+        val tMs = SystemClock.uptimeMillis()
+        // String concatenation only happens if ENABLED is true
+        Log.d(TAG, "$tMs,HARMONY,sector=${state.functionSector},pc=${state.rootPc},fc=${state.fingerCount}")
+    }
+
+    fun logAllNotesOff(reason: String) {
+        if (!ENABLED) return
+        val tMs = SystemClock.uptimeMillis()
+        val safeReason = reason.replace(",", ";")
+        Log.d(TAG, "$tMs,MIDI_ALL_OFF,$safeReason")
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\main\java\com\breathinghand\TouchLogger.kt
+
+@file:Suppress("ConstantConditionIf", "unused", "RedundantSuppression")
+
+package com.breathinghand
+
+import android.util.Log
+import android.view.MotionEvent
+import java.util.Locale
+import kotlin.math.max
+
+object TouchLogger {
+    private const val TAG = "FORENSIC_DATA"
+
+    // Default to FALSE for production performance
+    private const val ENABLED = false
+
+    private var lastMoveLogMs: Long = 0L
+
+    fun log(
+        event: MotionEvent,
+        viewWidth: Int,
+        viewHeight: Int,
+        moveMinIntervalMs: Long = 16L,
+        includeHistory: Boolean = false
+    ) {
+        // GUARD CLAUSE: Strict early exit
+        if (!ENABLED) return
+
+        val actionMasked = event.actionMasked
+        val actionStr = actionToString(actionMasked)
+
+        val tMsNow = event.eventTime // ms since boot (uptime)
+        if (actionMasked == MotionEvent.ACTION_MOVE) {
+            if (tMsNow - lastMoveLogMs < moveMinIntervalMs) return
+            lastMoveLogMs = tMsNow
+        }
+
+        val w = max(viewWidth, 1)
+        val h = max(viewHeight, 1)
+
+        if (includeHistory && actionMasked == MotionEvent.ACTION_MOVE) {
+            val hs = event.historySize
+            for (histIdx in 0 until hs) {
+                val tHist = event.getHistoricalEventTime(histIdx)
+                logPointers(tHist, "MOVE_HIST", event, w, h, histIdx)
+            }
+        }
+
+        logPointers(tMsNow, actionStr, event, w, h, -1)
+    }
+
+    private fun logPointers(
+        tMs: Long,
+        actionStr: String,
+        event: MotionEvent,
+        w: Int,
+        h: Int,
+        historyIdx: Int
+    ) {
+        val count = event.pointerCount
+
+        for (i in 0 until count) {
+            val pid = event.getPointerId(i)
+
+            val x = if (historyIdx >= 0) event.getHistoricalX(i, historyIdx) else event.getX(i)
+            val y = if (historyIdx >= 0) event.getHistoricalY(i, historyIdx) else event.getY(i)
+
+            val pressure = event.getPressure(i)
+            val size = event.getSize(i)
+
+            val xNorm = x / w.toFloat()
+            val yNorm = y / h.toFloat()
+
+            val line = String.format(
+                Locale.US,
+                "%d,TOUCH_RAW,%s,%d,%d,%.2f,%.2f,%.5f,%.5f,%.4f,%.4f,%d",
+                tMs, actionStr, pid, count,
+                x, y, xNorm, yNorm,
+                pressure, size, historyIdx
+            )
+            Log.d(TAG, line)
+        }
+    }
+
+    private fun actionToString(actionMasked: Int): String {
+        return when (actionMasked) {
+            MotionEvent.ACTION_DOWN -> "DOWN"
+            MotionEvent.ACTION_MOVE -> "MOVE"
+            MotionEvent.ACTION_UP -> "UP"
+            MotionEvent.ACTION_POINTER_DOWN -> "PTR_DOWN"
+            MotionEvent.ACTION_POINTER_UP -> "PTR_UP"
+            MotionEvent.ACTION_CANCEL -> "CANCEL"
+            else -> "OTHER"
+        }
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\test\java\com\breathinghand\audio\AudioDecoderTest.kt
+
+package com.breathinghand.audio
+
+import org.junit.Assert.*
+import org.junit.Test
+import java.nio.ByteBuffer
+
+class AudioDecoderTest {
+    @Test
+    fun buildWavHeaderProducesCorrectSizes() {
+        val sampleRate = 44100
+        val channels = 2
+        val bits = 16
+        val pcm = ByteArray(44100 * channels * (bits/8)) { 0 }
+
+        val wav = AudioDecoder.buildWavFromPcm(pcm, sampleRate, channels, bits)
+        // RIFF header
+        assertEquals('R'.code.toByte(), wav[0])
+        assertEquals('I'.code.toByte(), wav[1])
+        assertEquals('F'.code.toByte(), wav[2])
+        assertEquals('F'.code.toByte(), wav[3])
+
+        // data size is at offset 40 (little-endian int)
+        val dataSize = ByteBuffer.wrap(wav, 40, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+        assertEquals(pcm.size, dataSize)
+
+        // sample rate at offset 24
+        val sr = ByteBuffer.wrap(wav, 24, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+        assertEquals(sampleRate, sr)
+
+        // channels at offset 22 (little-endian short)
+        val ch = ByteBuffer.wrap(wav, 22, 2).order(java.nio.ByteOrder.LITTLE_ENDIAN).short.toInt()
+        assertEquals(channels, ch)
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\app\src\test\java\com\breathinghand\core\ExampleUnitTest.kt
+
+package com.breathinghand.core
+
+import org.junit.Test
+
+import org.junit.Assert.*
+
+/**
+ * Example local unit test, which will execute on the development machine (host).
+ *
+ * See [testing documentation](http://d.android.com/tools/testing).
+ */
+class ExampleUnitTest {
+    @Test
+    fun addition_isCorrect() {
+        assertEquals(4, 2 + 2)
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\androidDeviceTest\kotlin\com\breathinghand\shared\ExampleInstrumentedTest.kt
+
+package com.breathinghand.shared
+
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.ext.junit.runners.AndroidJUnit4
+
+import org.junit.Test
+import org.junit.runner.RunWith
+
+import org.junit.Assert.*
+
+/**
+ * Instrumented test, which will execute on an Android device.
+ *
+ * See [testing documentation](http://d.android.com/tools/testing).
+ */
+@RunWith(AndroidJUnit4::class)
+class ExampleInstrumentedTest {
+    @Test
+    fun useAppContext() {
+        // Context of the app under test.
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        assertEquals("com.breathinghand.shared.test", appContext.packageName)
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\androidHostTest\kotlin\com\breathinghand\shared\ExampleUnitTest.kt
+
+package com.breathinghand.shared
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+/**
+ * Example local unit test, which will execute on the development machine (host).
+ *
+ * See [testing documentation](http://d.android.com/tools/testing).
+ */
+class ExampleUnitTest {
+    @Test
+    fun addition_isCorrect() {
+        assertEquals(4, 2 + 2)
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\androidHostTest\kotlin\com\breathinghand\shared\HarmonicLogicTest.kt
+
+package com.breathinghand.shared
+
+import com.breathinghand.core.*
+import kotlin.math.PI
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class HarmonicLogicTest {
+
+    // --- TEST 1: Verify Rule 8 (Closed Grip = Instability) ---
+    @Test
+    fun testInstabilityOverride() {
+        val state = HarmonicState()
+        val roles = IntArray(4)
+
+        // Setup: 4 fingers, Fan shape (normally Major 7th)
+        state.fingerCount = 4
+        state.triad = GestureAnalyzerV01.TRIAD_FAN
+        state.seventh = GestureAnalyzerV01.SEVENTH_COMPACT
+        state.rootPc = 0 // C
+
+        // Case A: Stable (Open hand) -> Should be Major 7 (C, G, E, B)
+        state.harmonicInstability = 0.0f
+        HarmonicFieldMapV01.fillRoleNotes(state, roles)
+
+        // C4=60. Expect: 60 (Root), 67 (P5), 64 (M3), 71 (M7)
+        assertEquals(60, roles[0], "Stable Root should be C")
+        assertEquals(67, roles[1], "Stable 5th should be Perfect")
+        assertEquals(64, roles[2], "Stable 3rd should be Major (FAN)")
+        assertEquals(71, roles[3], "Stable 7th should be Major (COMPACT)")
+
+        // Case B: Unstable (Closed hand) -> Should be Diminished (C, Gb, Eb, Bbb/A)
+        state.harmonicInstability = 1.0f // Maximum instability
+        HarmonicFieldMapV01.fillRoleNotes(state, roles)
+
+        // Expect: 60 (Root), 66 (d5), 63 (m3), 69 (d7/M6)
+        assertEquals(60, roles[0], "Root stays C")
+        assertEquals(66, roles[1], "Unstable 5th should be Diminished (Gb)")
+        assertEquals(63, roles[2], "Unstable 3rd should be Minor (Eb)")
+        assertEquals(69, roles[3], "Unstable 7th should be Diminished (A)")
+    }
+
+    // --- TEST 2: Verify Rule 3 (Layered Addition) ---
+    @Test
+    fun testLayeredHarmony() {
+        val state = HarmonicState()
+        val roles = IntArray(4)
+        state.rootPc = 0
+        state.harmonicInstability = 0f
+
+        // 1 Finger: Reference only
+        state.fingerCount = 1
+        var count = HarmonicFieldMapV01.fillRoleNotes(state, roles)
+        assertEquals(1, count)
+        assertEquals(72, roles[0]) // C5 (Reference)
+        assertEquals(0, roles[1])  // No 5th
+
+        // 2 Fingers: Add 5th
+        state.fingerCount = 2
+        count = HarmonicFieldMapV01.fillRoleNotes(state, roles)
+        assertEquals(2, count)
+        assertEquals(60, roles[0]) // Drops to C4 base
+        assertEquals(67, roles[1]) // Adds G
+
+        // 3 Fingers: Add Color
+        state.fingerCount = 3
+        state.triad = GestureAnalyzerV01.TRIAD_FAN // Major
+        count = HarmonicFieldMapV01.fillRoleNotes(state, roles)
+        assertEquals(3, count)
+        assertEquals(64, roles[2]) // Adds E (M3)
+    }
+
+    // --- TEST 3: Verify Rule 5 (Physics/Dwell) ---
+    @Test
+    fun testHarmonicInertia() {
+        val engine = HarmonicEngine()
+
+        // 1. Initial Touch at 0 degrees (Sector 0 / C)
+        engine.update(
+            nowMs = 1000L,
+            angleRad = 0f,
+            spreadPx = 200f, centerYNorm = 0.5f, fingerCount = 1,
+            triadArchetype = 0, seventhArchetype = 0
+        )
+        assertEquals(0, engine.state.functionSector, "Should start at Sector 0")
+
+        // 2. Move slightly into Sector 1 boundary (Hysteresis check)
+        // Sector width is ~0.52 rad. Move to 0.4 (close to edge but not fully committed)
+        engine.update(
+            nowMs = 1010L, // Only 10ms passed
+            angleRad = 0.4f,
+            spreadPx = 200f, centerYNorm = 0.5f, fingerCount = 1,
+            triadArchetype = 0, seventhArchetype = 0
+        )
+        assertEquals(0, engine.state.functionSector, "Should hold Sector 0 due to dwell/hysteresis")
+
+        // 3. Move fully into Center of Sector 1 and wait (Dwell check)
+        // FIX: Use 1.5 * width (45 degrees) to hit the center, ensuring hysteresis is cleared.
+        val sector1Center = (1.5 * 2 * PI / 12).toFloat()
+        engine.update(
+            nowMs = 1020L,
+            angleRad = sector1Center,
+            spreadPx = 200f, centerYNorm = 0.5f, fingerCount = 1,
+            triadArchetype = 0, seventhArchetype = 0
+        )
+        // Still shouldn't change immediately (only 20ms since start of dwell candidate)
+        assertEquals(0, engine.state.functionSector, "Should wait for dwell timer")
+
+        // 4. Fast forward time > DWELL_THRESHOLD_MS (90ms)
+        engine.update(
+            nowMs = 1200L, // +180ms later
+            angleRad = sector1Center,
+            spreadPx = 200f, centerYNorm = 0.5f, fingerCount = 1,
+            triadArchetype = 0, seventhArchetype = 0
+        )
+        assertEquals(1, engine.state.functionSector, "Should advance to Sector 1 after dwell")
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\androidMain\kotlin\com\breathinghand\shared\Platform.android.kt
+
+package com.breathinghand.shared
+
+actual fun platform() = "Android"
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\Core_Data_Structures.kt
+
+package com.breathinghand.core
+
+/**
+ * Represents the continuously evolving harmonic state of the instrument.
+ * Single Source of Truth for: Engine, VoiceLeader, and UI.
+ */
+data class HarmonicState(
+    /**
+     * Root pitch class (0–11).
+     * Follows circle-of-fifths logic (0=C, 7=G, etc).
+     */
+    var rootPc: Int = 0,
+
+    /**
+     * Current functional sector (0–11) on the circle of fifths.
+     * Used for hysteresis calculation.
+     */
+    var functionSector: Int = 0,
+
+    /**
+     * Continuous harmonic instability factor (0.0..1.0).
+     * Derived from finger spread.
+     * > INSTABILITY_THRESHOLD overrides the chord quality to Diminished.
+     */
+    var harmonicInstability: Float = 0f,
+
+    /**
+     * Number of active fingers (0..4+).
+     * Defines the number of active layers (roles).
+     */
+    var fingerCount: Int = 0,
+
+    /**
+     * Latched Triad Archetype (e.g. TRIAD_FAN, TRIAD_STRETCH).
+     * Determined by gesture geometry at the moment of 3-finger contact.
+     */
+    var triad: Int = GestureAnalyzerV01.TRIAD_FAN,
+
+    /**
+     * Latched Seventh Archetype (e.g. SEVENTH_COMPACT).
+     * Determined by gesture geometry at the moment of 4-finger contact.
+     */
+    var seventh: Int = GestureAnalyzerV01.SEVENTH_COMPACT
+) {
+    /**
+     * Helper to copy state values without allocation churn.
+     * Essential for the hot path.
+     */
+    fun copyFrom(other: HarmonicState) {
+        this.rootPc = other.rootPc
+        this.functionSector = other.functionSector
+        this.harmonicInstability = other.harmonicInstability
+        this.fingerCount = other.fingerCount
+        this.triad = other.triad
+        this.seventh = other.seventh
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\GestureAnalyzerV01.kt
+
+package com.breathinghand.core
+
+import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.sqrt
+
+/**
+ * Gesture Grammar v0.1: archetype classifier.
+ *
+ * IMPORTANT:
+ * - Evaluated ONLY on semantic events (landing / add-finger).
+ * - Outputs are LATCHED and stable between semantic events.
+ * - Triad archetype is determined when we *reach* 3 fingers (or land with >=3).
+ * - Adding the 4th finger does NOT re-evaluate the triad (only adds the 7th).
+ *
+ * Allocation-free: uses fixed scratch arrays.
+ */
+class GestureAnalyzerV01(
+    private val r1Px: Float,
+    private val r2Px: Float
+) {
+
+    companion object {
+        // Semantic events
+        const val EVENT_NONE = 0
+        const val EVENT_LANDING = 1
+        const val EVENT_ADD_FINGER = 2
+
+        // Triad archetypes (3 fingers)
+        const val TRIAD_NONE = 0
+        const val TRIAD_FAN = 1       // +M3
+        const val TRIAD_STRETCH = 2   // +m3
+        const val TRIAD_CLUSTER = 3   // sus4 (v0.1)
+
+        // Seventh archetypes (4 fingers)
+        const val SEVENTH_NONE = 0
+        const val SEVENTH_COMPACT = 1 // +M7
+        const val SEVENTH_WIDE = 2    // +m7
+    }
+
+    // Latched outputs
+    var latchedTriad: Int = TRIAD_FAN
+        private set
+
+    var latchedSeventh: Int = SEVENTH_COMPACT
+        private set
+
+    /**
+     * Transition Window re-touch: preserve semantic layers verbatim.
+     */
+    fun seedFromState(state: HarmonicState) {
+        latchedTriad = state.triad
+        latchedSeventh = state.seventh
+    }
+
+    // Scratch: active slots (max 5)
+    private val activeSlots = IntArray(MusicalConstants.MAX_VOICES)
+
+    /**
+     * Update archetypes ONLY when a semantic event occurs.
+     *
+     * @param frame Current TouchFrame (slot arrays).
+     * @param pointerCount Active pointer count (already computed).
+     * @param spreadPx Mean spread (TouchMath.radius after smoothing is OK).
+     * @param event One of EVENT_*.
+     */
+    fun onSemanticEvent(frame: TouchFrame, pointerCount: Int, spreadPx: Float, event: Int) {
+        if (event == EVENT_NONE) return
+
+        // Landing resets to defaults (stable baseline).
+        if (event == EVENT_LANDING) {
+            latchedTriad = TRIAD_FAN
+            latchedSeventh = SEVENTH_COMPACT
+        }
+
+        // Build active slot list (allocation-free)
+        var n = 0
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            if (frame.pointerIds[i] != TouchFrame.INVALID_ID) {
+                activeSlots[n] = i
+                n++
+            }
+        }
+
+        val pc = pointerCount.coerceIn(0, 5)
+
+        // TRIAD: evaluate on LANDING with >=3 fingers, or on ADD when the count becomes 3.
+        val shouldEvalTriad =
+            (pc >= 3) && (n >= 3) && (event == EVENT_LANDING || pc == 3)
+
+        if (shouldEvalTriad) {
+            // Pass only the two arguments the function is built to receive
+            latchedTriad = classifyTriad(frame, spreadPx)
+        }
+
+
+        // SEVENTH: evaluate on LANDING with >=4, or on ADD when the count becomes 4.
+        val shouldEvalSeventh =
+            (pc >= 4) && (event == EVENT_LANDING || pc == 4)
+
+        if (shouldEvalSeventh) {
+            latchedSeventh = classifySeventh(spreadPx)
+        }
+    }
+
+    /**
+     * Classify triad using all active slots (order-independent).
+     * Computes pairwise distances for geometric analysis.
+     */
+    private fun classifyTriad(frame: TouchFrame, spreadPx: Float): Int {
+        // 1) CLUSTER: tight spread relative to minimum threshold.
+        val clusterThresh = r1Px * InputTuning.GRIP_CLUSTER_SPREAD_FACTOR
+        if (spreadPx < clusterThresh) return TRIAD_CLUSTER
+
+        // Collect all pairwise distances (order-independent)
+        val distances = computeAllPairwiseDistances(frame)
+        if (distances.count == 0) return TRIAD_FAN
+
+        val dMax = distances.max
+        val dMin = distances.min
+        val dMean = distances.sum / distances.count
+
+        // 2) STRETCH: elongated triangle.
+        if (dMin > 0.0001f) {
+            val pairRatio = dMax / dMin
+            if (pairRatio >= InputTuning.GRIP_STRETCH_PAIR_RATIO) return TRIAD_STRETCH
+        }
+
+        if (dMean > 0.0001f) {
+            val meanRatio = dMax / dMean
+            if (meanRatio >= InputTuning.GRIP_STRETCH_MEAN_RATIO) return TRIAD_STRETCH
+        }
+
+        // 3) FAN: default.
+        return TRIAD_FAN
+    }
+
+    // Scratch structure for pairwise distance computation (zero-allocation)
+    private class DistanceStats {
+        var min: Float = Float.MAX_VALUE
+        var max: Float = 0f
+        var sum: Float = 0f
+        var count: Int = 0
+
+        fun reset() {
+            min = Float.MAX_VALUE
+            max = 0f
+            sum = 0f
+            count = 0
+        }
+
+        fun add(d: Float) {
+            if (d < min) min = d
+            if (d > max) max = d
+            sum += d
+            count++
+        }
+    }
+
+    private val distanceStats = DistanceStats()
+
+    private fun computeAllPairwiseDistances(frame: TouchFrame): DistanceStats {
+        distanceStats.reset()
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            if (frame.pointerIds[i] == TouchFrame.INVALID_ID) continue
+            for (j in i + 1 until MusicalConstants.MAX_VOICES) {
+                if (frame.pointerIds[j] == TouchFrame.INVALID_ID) continue
+                val d = dist(frame, i, j)
+                distanceStats.add(d)
+            }
+        }
+        return distanceStats
+    }
+
+    private fun classifySeventh(spreadPx: Float): Int {
+        // Wide spread relative to BLUE radius -> minor 7th.
+        val wideThresh = r2Px * InputTuning.GRIP_WIDE_SPREAD_FACTOR
+        return if (spreadPx >= wideThresh) SEVENTH_WIDE else SEVENTH_COMPACT
+    }
+
+    private fun dist(frame: TouchFrame, a: Int, b: Int): Float {
+        val dx = frame.x[a] - frame.x[b]
+        val dy = frame.y[a] - frame.y[b]
+        return sqrt(dx * dx + dy * dy)
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\HarmonicEngine.kt
+
+package com.breathinghand.core
+
+import kotlin.math.PI
+import kotlin.math.abs
+
+class HarmonicEngine {
+    // Single Source of Truth from Core_Data_Structures.kt
+    val state: HarmonicState = HarmonicState()
+
+    private var hasTouch: Boolean = false
+    private var candidateSector: Int = 0
+    private var dwellStartMs: Long = 0L
+
+    private var lastAngleRad: Float = 0f
+    private var lastAngleTimeMs: Long = 0L
+
+    fun onAllFingersLift(nowMs: Long) {
+        hasTouch = false
+        lastAngleTimeMs = 0L
+    }
+
+    fun beginFromRestoredState(nowMs: Long, restored: HarmonicState, angleRad: Float) {
+        state.copyFrom(restored)
+        hasTouch = true
+        candidateSector = state.functionSector
+        dwellStartMs = nowMs
+        lastAngleRad = angleRad
+        lastAngleTimeMs = 0L
+    }
+
+    fun update(
+        nowMs: Long,
+        angleRad: Float,
+        spreadPx: Float,
+        centerYNorm: Float,
+        fingerCount: Int,
+        triadArchetype: Int,
+        seventhArchetype: Int
+    ): Boolean {
+        val prevSector = state.functionSector
+        val prevPc = state.rootPc
+        val prevInst = state.harmonicInstability
+        val prevFc = state.fingerCount
+        val prevTriad = state.triad
+        val prevSev = state.seventh
+
+        if (!hasTouch) {
+            val biasSector = initialBiasSector(centerYNorm)
+            state.functionSector = biasSector
+            state.rootPc = sectorToPitchClass(biasSector)
+            candidateSector = biasSector
+            dwellStartMs = nowMs
+            lastAngleTimeMs = 0L
+            hasTouch = true
+        }
+
+        val fc = fingerCount.coerceIn(0, 4)
+        state.fingerCount = fc
+        state.triad = if (fc >= 3) triadArchetype else GestureAnalyzerV01.TRIAD_NONE
+        state.seventh = if (fc >= 4) seventhArchetype else GestureAnalyzerV01.SEVENTH_NONE
+
+        state.harmonicInstability = spreadToInstability(spreadPx)
+
+        val rawSector = quantizeAngleToSector(angleRad)
+        val hysteresisSector = applyAngularHysteresis(state.functionSector, rawSector, angleRad)
+
+        if (hysteresisSector != candidateSector) {
+            candidateSector = hysteresisSector
+            dwellStartMs = nowMs
+        }
+
+        val angVel = computeAngularVelocity(nowMs, angleRad)
+        val dwellMs = nowMs - dwellStartMs
+        val shouldAdvance =
+            dwellMs >= MusicalConstants.DWELL_THRESHOLD_MS ||
+                    abs(angVel) >= MusicalConstants.ANGULAR_SNAP_THRESHOLD_RAD_PER_SEC
+
+        if (shouldAdvance && candidateSector != state.functionSector) {
+            state.functionSector = candidateSector
+            state.rootPc = sectorToPitchClass(candidateSector)
+        }
+
+        return prevSector != state.functionSector ||
+                prevPc != state.rootPc ||
+                prevInst != state.harmonicInstability ||
+                prevFc != state.fingerCount ||
+                prevTriad != state.triad ||
+                prevSev != state.seventh
+    }
+
+    private fun computeAngularVelocity(nowMs: Long, angleRad: Float): Float {
+        val t0 = lastAngleTimeMs
+        lastAngleTimeMs = nowMs
+        val a0 = lastAngleRad
+        lastAngleRad = angleRad
+
+        if (t0 == 0L) return 0f
+        val dt = (nowMs - t0).toFloat() / 1000f
+        if (dt <= 0f) return 0f
+
+        val da = shortestAngleDelta(a0, angleRad)
+        return da / dt
+    }
+
+    private fun shortestAngleDelta(a0: Float, a1: Float): Float {
+        var d = a1 - a0
+        val twoPi = (2.0 * PI).toFloat()
+        val pi = PI.toFloat()
+        while (d > pi) d -= twoPi
+        while (d < -pi) d += twoPi
+        return d
+    }
+
+    private fun quantizeAngleToSector(angleRad: Float): Int {
+        val twoPi = (2.0 * PI).toFloat()
+        var a = angleRad % twoPi
+        if (a < 0f) a += twoPi
+
+        val sectorFloat = a / twoPi * 12f
+        var s = sectorFloat.toInt()
+        if (s < 0) s = 0
+        if (s > 11) s = 11
+        return s
+    }
+
+    private fun applyAngularHysteresis(currentSector: Int, rawSector: Int, angleRad: Float): Int {
+        if (rawSector == currentSector) return rawSector
+
+        val margin = MusicalConstants.SECTOR_HYSTERESIS_RAD
+        val twoPi = (2.0 * PI).toFloat()
+        val sectorWidth = twoPi / 12f
+
+        val rawCenter = (rawSector + 0.5f) * sectorWidth
+        val delta = abs(shortestAngleDelta(rawCenter, angleRad))
+        return if (delta < (sectorWidth * 0.5f - margin)) rawSector else currentSector
+    }
+
+    private fun sectorToPitchClass(sector: Int): Int {
+        return (sector * 7) % 12
+    }
+
+    private fun spreadToInstability(spreadPx: Float): Float {
+        val min = MusicalConstants.SPREAD_MIN_PX
+        val max = MusicalConstants.SPREAD_MAX_PX
+        if (max <= min) return 0f
+        val t = ((spreadPx - min) / (max - min)).coerceIn(0f, 1f)
+        return 1f - t
+    }
+
+    private fun initialBiasSector(centerYNorm: Float): Int {
+        return when {
+            centerYNorm < MusicalConstants.BIAS_UPPER_CUTOFF_NORM -> MusicalConstants.BIAS_SECTOR_UPPER
+            centerYNorm > MusicalConstants.BIAS_LOWER_CUTOFF_NORM -> MusicalConstants.BIAS_SECTOR_LOWER
+            else -> MusicalConstants.BIAS_SECTOR_CENTER
+        }
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\HarmonicFieldMapV01.kt
+
+package com.breathinghand.core
+
+/**
+ * Harmonic Map v0.2 ("Stable Gravity Map")
+ * Complies with Rule 8: Closed grip (> INSTABILITY_THRESHOLD) forces diminished symmetry.
+ *
+ * IMPORTANT:
+ * - state.rootPc is already a pitch class (0..11).
+ * - Any circle-of-fifths sector mapping must happen upstream (HarmonicEngine), not here.
+ */
+object HarmonicFieldMapV01 {
+
+    private const val REF_TONE_BASE_MIDI = 72 // C5
+    private const val CHORD_BASE_MIDI = 60    // C4
+
+    /**
+     * Fill roleNotes[0..3].
+     * @return number of active roles (0..4)
+     */
+    fun fillRoleNotes(state: HarmonicState, roleNotes: IntArray): Int {
+        if (roleNotes.size < 4) return 0
+
+        // 1) Clean slate
+        roleNotes[0] = 0
+        roleNotes[1] = 0
+        roleNotes[2] = 0
+        roleNotes[3] = 0
+
+        val fingers = state.fingerCount.coerceIn(0, 4)
+        if (fingers <= 0) return 0
+
+        // 2) Base pitch (rootPc is already a pitch class)
+        // FIX: Kept the Developer's fix here (no double mapping)
+        val rootPc = state.rootPc.coerceIn(0, 11)
+        val base = if (fingers == 1) REF_TONE_BASE_MIDI else CHORD_BASE_MIDI
+        val root = base + rootPc
+
+        // 3) Instability override (semantic, not temporal)
+        val isUnstable = state.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD
+
+        // Role 0: Root
+        roleNotes[0] = root
+        var count = 1
+
+        if (fingers >= 2) {
+            // Role 1: Fifth (Perfect or Diminished)
+            roleNotes[1] = if (isUnstable) root + 6 else root + 7
+            count = 2
+        }
+
+        if (fingers >= 3) {
+            // Role 2: Triad color
+            val interval = if (isUnstable) {
+                3 // minor third in diminished context
+            } else {
+                when (state.triad) {
+                    GestureAnalyzerV01.TRIAD_STRETCH -> 3 // m3
+                    GestureAnalyzerV01.TRIAD_CLUSTER -> 5 // sus4
+                    else -> 4                             // M3 (FAN)
+                }
+            }
+            roleNotes[2] = root + interval
+            count = 3
+        }
+
+        if (fingers >= 4) {
+            // Role 3: Seventh / extension
+            val interval = if (isUnstable) {
+                9 // diminished 7th (root + 9)
+            } else {
+                when (state.seventh) {
+                    GestureAnalyzerV01.SEVENTH_WIDE -> 10 // m7
+                    else -> 11                            // M7
+                }
+            }
+            roleNotes[3] = root + interval
+            count = 4
+        }
+
+        // FIX: REMOVED "Voicing Loop".
+        // The tests expect raw semantic pitches.
+        // The synth/sound engine can handle voicing if needed, but the Map should return pure intervals.
+
+        return count
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\InputTuning.kt
+
+package com.breathinghand.core
+
+/**
+ * HCI Research Results (Chapters 3C + Gesture Grammar v0.2)
+ * Scientifically derived biomechanical constants.
+ *
+ * IMPORTANT:
+ * - This file must NOT contain temporal gating for harmony.
+ * - Any timing used in the project must be for rhythmic coherence only (Transition Window etc),
+ * and must live with those timing definitions (e.g. MusicalConstants).
+ */
+object InputTuning {
+
+    // -----------------------------------------------------------------
+    // 1) SIGNAL CONDITIONING (1 Euro Filter)
+    // -----------------------------------------------------------------
+    const val FILTER_MIN_CUTOFF = 1.0f  // Hz (silences <0.4px jitter)
+    const val FILTER_BETA = 0.02f       // (reduces lag at high velocity)
+
+    // -----------------------------------------------------------------
+    // 2) SPATIAL LOGIC (Hysteresis)
+    // -----------------------------------------------------------------
+    // FIX: Removed unused constants (ANGLE_HYSTERESIS_DEG, RADIUS_HYSTERESIS_PX)
+    // Logic is now handled by HarmonicEngine parameters.
+
+    // -----------------------------------------------------------------
+    // 3) GESTURE GRAMMAR (Grip archetype thresholds)
+    // -----------------------------------------------------------------
+    // TRIAD (3 fingers)
+    // - CLUSTER if spread is tight relative to the small-radius stability zone.
+    const val GRIP_CLUSTER_SPREAD_FACTOR = 0.90f
+
+    // - STRETCH if triangle is very elongated.
+    //   pairRatio = maxPair / minPair
+    //   meanRatio = maxPair / meanPair
+    const val GRIP_STRETCH_PAIR_RATIO = 1.80f
+    const val GRIP_STRETCH_MEAN_RATIO = 1.35f
+
+    // SEVENTH (4 fingers)
+    // - WIDE spread at large radius => minor 7th; otherwise major 7th.
+    const val GRIP_WIDE_SPREAD_FACTOR = 1.15f
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\midi\MidiOut.kt
+
+package com.breathinghand.core.midi
+
+/**
+ * KMP-safe MIDI message builder + sender.
+ *
+ * Hot-path contract:
+ * - If FORENSIC_TX_LOG is false (default), this class is allocation-free in steady-state use.
+ * - Forensic logging is opt-in and must remain OFF for performance validation.
+ */
+class MidiOut(
+    private val sink: MidiSink,
+    private val clock: MonotonicClock? = null,
+    private val logger: ForensicLogger? = null
+) {
+
+    companion object {
+        // Must remain FALSE by default (Rule 8: no hot-path overhead unless explicitly enabled)
+        // FIX: Removed @JvmField (caused KMP compilation error)
+        var FORENSIC_TX_LOG: Boolean = false
+        private const val FORENSIC_TAG = "FORENSIC_MIDI"
+    }
+
+    fun sendNoteOn(ch: Int, note: Int, vel: Int) {
+        val c = ch and 0x0F
+        val n = note.coerceIn(0, 127)
+        val v = vel.coerceIn(0, 127)
+        logTx("NOTE_ON", c, n, v)
+        sink.send3(0x90 or c, n, v)
+    }
+
+    fun sendNoteOff(ch: Int, note: Int) {
+        val c = ch and 0x0F
+        val n = note.coerceIn(0, 127)
+        logTx("NOTE_OFF", c, n, 0)
+        sink.send3(0x80 or c, n, 0)
+    }
+
+    fun sendPitchBend(ch: Int, bend14: Int) {
+        val c = ch and 0x0F
+        val b = bend14.coerceIn(0, 16383)
+        val lsb = b and 0x7F
+        val msb = (b shr 7) and 0x7F
+        logTx("PITCH_BEND", c, lsb, msb)
+        sink.send3(0xE0 or c, lsb, msb)
+    }
+
+    fun sendChannelPressure(ch: Int, pressure: Int) {
+        val c = ch and 0x0F
+        val p = pressure.coerceIn(0, 127)
+        logTx("CH_AFTERTOUCH", c, p, -1)
+        sink.send2(0xD0 or c, p)
+    }
+
+    fun sendCC(ch: Int, cc: Int, value: Int) {
+        val c = ch and 0x0F
+        val num = cc.coerceIn(0, 127)
+        val v = value.coerceIn(0, 127)
+        logTx("CC", c, num, v)
+        sink.send3(0xB0 or c, num, v)
+    }
+
+    fun close() {
+        sink.close()
+    }
+
+    private fun logTx(kind: String, ch: Int, a: Int, b: Int) {
+        if (!FORENSIC_TX_LOG) return
+        val tMs = clock?.nowMs() ?: return
+        val lg = logger ?: return
+
+        // midiCh is 1-based for humans/logs
+        val midiCh = (ch and 0x0F) + 1
+
+        // NOTE: This allocates when enabled, by design (forensic mode only).
+        if (b >= 0) {
+            lg.log(FORENSIC_TAG, "$tMs,MIDI_TX,$kind,$midiCh,$a,$b")
+        } else {
+            lg.log(FORENSIC_TAG, "$tMs,MIDI_TX,$kind,$midiCh,$a")
+        }
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\midi\MidiSink.kt
+
+package com.breathinghand.core.midi
+
+/**
+ * Zero-allocation MIDI transport contract (KMP-friendly).
+ */
+interface MidiSink {
+    fun send3(status: Int, data1: Int, data2: Int)
+    fun send2(status: Int, data1: Int)
+    fun close()
+}
+
+interface ForensicLogger {
+    fun log(tag: String, message: String)
+}
+
+interface MonotonicClock {
+    fun nowMs(): Long
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\MidiOutput.kt
+
+package com.breathinghand.core
+
+import com.breathinghand.core.midi.MidiOut
+import com.breathinghand.core.MusicalConstants
+
+/**
+ * Hot-path interface for sending note/expression data.
+ * Abstraction layer to support MPE, Standard MIDI, and Internal Audio.
+ */
+interface MidiOutput {
+    fun noteOn(slot: Int, note: Int, velocity: Int)
+    fun noteOff(slot: Int, note: Int)
+    fun pitchBend(slot: Int, bend14: Int)
+    fun channelPressure(slot: Int, pressure: Int)
+    fun cc(slot: Int, ccNum: Int, value: Int)
+    fun allNotesOff()
+    fun close()
+}
+
+/**
+ * MPE Implementation: 1-to-1 mapping (Slot 0 -> Ch 1, Slot 1 -> Ch 2, etc.)
+ * Note: Your project currently maps Slot 0 -> Ch 2 (Human Ch 2) based on MusicalConstants logic.
+ * We preserve your specific logic: channel = slot + 1
+ */
+class MpeMidiOutput(private val midi: MidiOut) : MidiOutput {
+
+    override fun noteOn(slot: Int, note: Int, velocity: Int) {
+        midi.sendNoteOn(slot + 1, note, velocity)
+    }
+
+    override fun noteOff(slot: Int, note: Int) {
+        midi.sendNoteOff(slot + 1, note)
+    }
+
+    override fun pitchBend(slot: Int, bend14: Int) {
+        midi.sendPitchBend(slot + 1, bend14)
+    }
+
+    override fun channelPressure(slot: Int, pressure: Int) {
+        midi.sendChannelPressure(slot + 1, pressure)
+    }
+
+    override fun cc(slot: Int, ccNum: Int, value: Int) {
+        midi.sendCC(slot + 1, ccNum, value)
+    }
+
+    override fun allNotesOff() {
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val ch = i + 1
+            midi.sendCC(ch, 123, 0) // All Notes Off
+            midi.sendPitchBend(ch, MusicalConstants.CENTER_PITCH_BEND)
+            midi.sendChannelPressure(ch, 0)
+        }
+    }
+
+    override fun close() {
+        midi.close()
+    }
+}
+
+/**
+ * Standard Implementation: All slots -> Channel 0 (Human Ch 1).
+ * CRITICAL FIX: Uses BooleanArray instead of HashSet to avoid allocations.
+ */
+class StandardMidiOutput(private val midi: MidiOut) : MidiOutput {
+
+    private val TARGET_CHANNEL = 0 // Human Channel 1
+
+    // Zero-allocation tracking of active notes to prevent stuck notes
+    private val activeNotes = BooleanArray(128)
+
+    override fun noteOn(slot: Int, note: Int, velocity: Int) {
+        val safeNote = note.coerceIn(0, 127)
+        activeNotes[safeNote] = true
+        midi.sendNoteOn(TARGET_CHANNEL, safeNote, velocity)
+    }
+
+    override fun noteOff(slot: Int, note: Int) {
+        val safeNote = note.coerceIn(0, 127)
+        // In standard MIDI, if multiple fingers hold the same note,
+        // one note-off usually kills it. We just send it.
+        if (activeNotes[safeNote]) {
+            activeNotes[safeNote] = false
+            midi.sendNoteOff(TARGET_CHANNEL, safeNote)
+        }
+    }
+
+    override fun pitchBend(slot: Int, bend14: Int) {
+        // Reductive Logic: Only the Primary Finger (Slot 0) controls global pitch bend.
+        // This prevents "fighting" where 5 fingers send 5 different bend values to one channel.
+        if (slot == 0) {
+            midi.sendPitchBend(TARGET_CHANNEL, bend14)
+        }
+    }
+
+    override fun channelPressure(slot: Int, pressure: Int) {
+        // Reductive Logic: Maximize pressure or use Primary.
+        // Using Primary (Slot 0) is safer for clean control.
+        if (slot == 0) {
+            midi.sendChannelPressure(TARGET_CHANNEL, pressure)
+        }
+    }
+
+    override fun cc(slot: Int, ccNum: Int, value: Int) {
+        // Reductive Logic: Only Primary Finger controls global CC.
+        if (slot == 0) {
+            midi.sendCC(TARGET_CHANNEL, ccNum, value)
+        }
+    }
+
+    override fun allNotesOff() {
+        // Iterate primitive array - no iterator allocation
+        for (i in 0..127) {
+            if (activeNotes[i]) {
+                midi.sendNoteOff(TARGET_CHANNEL, i)
+                activeNotes[i] = false
+            }
+        }
+        midi.sendCC(TARGET_CHANNEL, 123, 0)
+        midi.sendPitchBend(TARGET_CHANNEL, MusicalConstants.CENTER_PITCH_BEND)
+    }
+
+    override fun close() {
+        allNotesOff()
+        midi.close()
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\MusicalConstants.kt
+
+package com.breathinghand.core
+
+object MusicalConstants {
+    // --- SYSTEM INTEGRITY ---
+    /**
+     * GLOBAL DEBUG FLAG.
+     * MUST be false for production/performance validation.
+     * When true, forensic logging is enabled (allocates strings).
+     */
+    const val IS_DEBUG = false
+
+
+    // Music domain
+    const val MIDDLE_C = 60
+    const val MAX_NOTE = 96 // C7
+    const val MAX_VOICES = 5
+
+    // Geometry / UI
+    const val SECTOR_COUNT = 12
+    const val BASE_RADIUS_INNER = 150f  // px at 1x density
+    const val BASE_RADIUS_OUTER = 350f  // px at 1x density
+    const val SPREAD_RADIUS_MULTIPLIER = 2.5f
+    const val MAX_POINTER_ID = 64
+
+    // MIDI Constants
+    const val CENTER_PITCH_BEND = 8192
+    const val CENTER_CC74 = 64
+    const val DEFAULT_VELOCITY = 90
+
+    // ----------------------------
+    // v0.2 — Continuous Harmonic Field
+    // ----------------------------
+
+    // Root motion stabilization (debounce + hysteresis).
+    const val DWELL_THRESHOLD_MS: Long = 90L
+    const val SECTOR_HYSTERESIS_RAD: Float = 0.12f
+
+    // "Fast throw" disabled by default.
+    const val ANGULAR_SNAP_THRESHOLD_RAD_PER_SEC: Float = 9999f
+
+    // Spread -> instability (continuous).
+    const val SPREAD_MIN_PX: Float = 35f
+    const val SPREAD_MAX_PX: Float = 220f
+    const val INSTABILITY_THRESHOLD: Float = 0.60f
+
+    // Transition Window (rhythmic-only re-articulation).
+    const val TRANSITION_WINDOW_MS: Long = 120L
+    const val TRANSITION_TOLERANCE_PX: Float = 40f
+
+    // Initial-only vertical bias.
+    const val BIAS_UPPER_CUTOFF_NORM: Float = 0.33f
+    const val BIAS_LOWER_CUTOFF_NORM: Float = 0.66f
+    const val BIAS_SECTOR_CENTER: Int = 0
+    const val BIAS_SECTOR_LOWER: Int = 2
+    const val BIAS_SECTOR_UPPER: Int = 4
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\MutableTouchPolar.kt
+
+package com.breathinghand.core
+
+/**
+ * A mutable data holder for touch coordinates.
+ * We use this instead of an immutable Data Class to avoid creating
+ * new objects every frame (Garbage Collection optimization).
+ */
+data class MutableTouchPolar(
+    var radius: Float = 0f,
+    var angle: Float = 0f,
+    var centerX: Float = 0f,
+    var centerY: Float = 0f,
+    var isActive: Boolean = false,
+    var pointerCount: Int = 0
+)
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\TimbreNavigator.kt
+
+package com.breathinghand.core
+
+import kotlin.math.abs
+import kotlin.math.sqrt
+
+/**
+ * Translationally invariant gesture layer.
+ * Zero-allocation version using MutableGesture.
+ */
+class TimbreNavigator(
+    private val maxPointerId: Int = 64,
+    private val deadzonePx: Float = 6f,
+    private val rangeXPx: Float = 220f,
+    private val rangeYPx: Float = 220f
+) {
+    private val originX = FloatArray(maxPointerId) { Float.NaN }
+    private val originY = FloatArray(maxPointerId) { Float.NaN }
+
+    // Reusable mutable holder to avoid allocation per compute()
+    data class MutableGesture(var dxNorm: Float = 0f, var dyNorm: Float = 0f, var distNorm: Float = 0f)
+
+    fun onPointerDown(pointerId: Int, x: Float, y: Float) {
+        if (pointerId !in 0 until maxPointerId) return
+        originX[pointerId] = x
+        originY[pointerId] = y
+    }
+
+    fun onPointerUp(pointerId: Int) {
+        if (pointerId !in 0 until maxPointerId) return
+        originX[pointerId] = Float.NaN
+        originY[pointerId] = Float.NaN
+    }
+
+    /**
+     * Clear all tracked origins. Call on pause/reset to prevent stale state.
+     */
+    fun resetAll() {
+        for (i in 0 until maxPointerId) {
+            originX[i] = Float.NaN
+            originY[i] = Float.NaN
+        }
+    }
+
+    /**
+     * Computes gesture data into the provided MutableGesture.
+     * Returns true if a valid gesture was computed (origin exists), false otherwise.
+     */
+    fun compute(pointerId: Int, x: Float, y: Float, outGesture: MutableGesture): Boolean {
+        if (pointerId !in 0 until maxPointerId) return false
+
+        val ox = originX[pointerId]
+        val oy = originY[pointerId]
+        if (ox.isNaN() || oy.isNaN()) {
+            outGesture.dxNorm = 0f
+            outGesture.dyNorm = 0f
+            outGesture.distNorm = 0f
+            return false
+        }
+
+        var dx = x - ox
+        var dy = y - oy
+
+        // Circular deadzone (instead of square) for consistent feel in all directions
+        val rawDist = sqrt(dx * dx + dy * dy)
+        if (rawDist < deadzonePx) {
+            dx = 0f
+            dy = 0f
+        }
+        val dxNorm = (dx / rangeXPx).coerceIn(-1f, 1f)
+        val dyNorm = (dy / rangeYPx).coerceIn(-1f, 1f)
+
+        // Euclidean distance in normalized space, clamped to 0..1
+        val dist = sqrt(dxNorm * dxNorm + dyNorm * dyNorm).coerceIn(0f, 1f)
+
+        outGesture.dxNorm = dxNorm
+        outGesture.dyNorm = dyNorm
+        outGesture.distNorm = dist
+        return true
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\TouchFrame.kt
+
+package com.breathinghand.core
+
+/**
+ * Platform-agnostic snapshot of touch state.
+ * Index == strict slot (0..MAX_VOICES-1).
+ *
+ * This is KMP-friendly: no MotionEvent, no Android APIs.
+ * Arrays are preallocated once.
+ */
+class TouchFrame(maxVoices: Int = MusicalConstants.MAX_VOICES) {
+    var activeCount: Int = 0
+    var tMs: Long = 0L // monotonic milliseconds (uptime)
+
+    val pointerIds = IntArray(maxVoices) { INVALID_ID }
+    val x = FloatArray(maxVoices)
+    val y = FloatArray(maxVoices)
+
+    // Normalized "musical force" 0..1 (preferred over raw pressure/size for the engine)
+    val force01 = FloatArray(maxVoices)
+
+    // Optional raw sensors (useful for debugging; iOS can fill approximations)
+    val pressure = FloatArray(maxVoices)
+    val size = FloatArray(maxVoices)
+
+    // Bitmask flags (DOWN/UP/WACK/etc). Keep layout consistent across platforms.
+    val flags = IntArray(maxVoices)
+
+    companion object {
+        const val INVALID_ID = -1
+        const val F_DOWN = 1 shl 0
+        const val F_UP = 1 shl 1
+        const val F_WACK = 1 shl 2
+        const val F_PRIMARY = 1 shl 3
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\TouchMath.kt
+
+package com.breathinghand.core
+
+import kotlin.math.atan2
+import kotlin.math.sqrt
+
+/**
+ * Platform-agnostic geometry extraction from TouchFrame.
+ *
+ * NOTE: Single-finger radius uses distance from screen center,
+ * while multi-finger uses average spread from centroid × multiplier.
+ * This discontinuity is intentional for different interaction modes,
+ * but may cause a jump when transitioning.
+ */
+object TouchMath {
+    fun reset() {
+        // No-op: TouchMath is stateless.
+        // Kept for lifecycle symmetry.
+    }
+
+    /**
+     * Platform-agnostic geometry extraction.
+     * Uses slot arrays from TouchFrame (index == slot 0..MAX_VOICES-1).
+     * No allocations.
+     */
+    fun update(frame: TouchFrame, cx: Float, cy: Float, outResult: MutableTouchPolar) {
+        val max = MusicalConstants.MAX_VOICES
+        var n = 0
+        for (i in 0 until max) {
+            if (frame.pointerIds[i] != TouchFrame.INVALID_ID) n++
+        }
+
+        if (n == 0) {
+            outResult.isActive = false
+            // --- Clean State ---
+            outResult.pointerCount = 0
+            outResult.radius = 0f
+            outResult.angle = 0f
+            outResult.centerX = 0f
+            outResult.centerY = 0f
+            return
+        }
+
+        // 1. Calculate Centroid (Average Position)
+        var sumX = 0f
+        var sumY = 0f
+        for (i in 0 until max) {
+            if (frame.pointerIds[i] == TouchFrame.INVALID_ID) continue
+            sumX += frame.x[i]
+            sumY += frame.y[i]
+        }
+        val handX = sumX / n
+        val handY = sumY / n
+
+        // 2. Calculate Radius (Average Spread from Centroid)
+        // This makes the hand feel like it "breathes" as a whole
+        var sumSpread = 0f
+        if (n > 1) {
+            for (i in 0 until max) {
+                if (frame.pointerIds[i] == TouchFrame.INVALID_ID) continue
+                val dx = frame.x[i] - handX
+                val dy = frame.y[i] - handY
+                sumSpread += sqrt(dx * dx + dy * dy)
+            }
+            // Multiplier tunes the feel so a comfortable spread hits the thresholds
+            outResult.radius = (sumSpread / n) * MusicalConstants.SPREAD_RADIUS_MULTIPLIER
+        } else {
+            // Single finger: Distance from screen center
+            val dx = handX - cx
+            val dy = handY - cy
+            outResult.radius = sqrt(dx * dx + dy * dy)
+        }
+
+        // 3. Calculate Angle (Centroid relative to Screen Center)
+        val dxCenter = handX - cx
+        val dyCenter = handY - cy
+
+        // ROTATION FIX: atan2(dx, -dy) ensures 0 degrees is UP (12 o'clock)
+        outResult.angle = atan2(dxCenter, -dyCenter)
+
+        // 4. Populate Result (CRITICAL FIX: Assign centroid)
+        outResult.centerX = handX
+        outResult.centerY = handY
+        outResult.isActive = true
+        outResult.pointerCount = n
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\TransitionWindow.kt
+
+package com.breathinghand.core
+
+/**
+ * v0.2 Transition Window — rhythmic-only re-articulation.
+ * Preserves the previous HarmonicState across rapid lift -> re-touch.
+ * Must never influence harmony selection.
+ */
+class TransitionWindow {
+    private var active: Boolean = false
+    private var tLiftMs: Long = 0L
+    private var cx: Float = 0f
+    private var cy: Float = 0f
+    private var fingerCount: Int = 0
+
+    val storedState: HarmonicState = HarmonicState()
+
+    fun arm(nowMs: Long, centerX: Float, centerY: Float, state: HarmonicState, lastFingerCount: Int) {
+        active = true
+        tLiftMs = nowMs
+        cx = centerX
+        cy = centerY
+        fingerCount = lastFingerCount
+        storedState.copyFrom(state)
+    }
+
+    fun disarm() {
+        active = false
+    }
+
+    fun consumeIfHit(nowMs: Long, centerX: Float, centerY: Float, newFingerCount: Int): Boolean {
+        if (!active) return false
+        val dt = nowMs - tLiftMs
+        if (dt < 0L || dt > MusicalConstants.TRANSITION_WINDOW_MS) return false
+        if (newFingerCount != fingerCount) return false
+
+        val dx = centerX - cx
+        val dy = centerY - cy
+        val tol = MusicalConstants.TRANSITION_TOLERANCE_PX
+        if ((dx * dx + dy * dy) > (tol * tol)) return false
+
+        active = false
+        return true
+    }
+}
+
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\core\VoiceLeader.kt
+
+package com.breathinghand.core
+
+/**
+ * Slot-stable MPE voice (slot index == voice index).
+ * PointerId binding is absolute: slot i is always MIDI channel (i+1).
+ *
+ * Note assignment (layer roles):
+ * - Notes are assigned by ROLE (layer) and mapped to active slots.
+ * - Roles are stable on finger-add, and compact on finger-remove, so:
+ * - 1 finger always becomes reference/root role (role 0)
+ * - 2 fingers => roles 0..1 (root + fifth)
+ * - 3 fingers => roles 0..2 (+ triad layer)
+ * - 4 fingers => roles 0..3 (+ seventh layer)
+ *
+ * KMP-safe: no android.* imports.
+ * Zero allocations in update hot path.
+ */
+private data class VoiceSlot(
+    val channel: Int,
+    var note: Int = 0,
+    var active: Boolean = false,
+    var pointerId: Int = TouchFrame.INVALID_ID
+)
+
+class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
+
+    // Slot index == voice index. Channel is fixed per slot for "sticky" MPE behavior.
+    private val voices = Array(MusicalConstants.MAX_VOICES) { i -> VoiceSlot(channel = i + 1) }
+
+    // Target note per slot (0 means "silent / no target").
+    private val targetNotes = IntArray(MusicalConstants.MAX_VOICES)
+
+    // ROLE -> note (v0.1 uses roles 0..3)
+    private val roleNotes = IntArray(4)
+
+    // Slot -> role (0..3), or -1 if unassigned/extra finger.
+    private val roleBySlot = IntArray(MusicalConstants.MAX_VOICES) { -1 }
+
+    // Scratch (no allocations)
+    private val activeSlotsScratch = IntArray(MusicalConstants.MAX_VOICES)
+
+    private var lastActiveCount = 0
+
+    // PointerId -> velocity lookup (O(1), no allocations).
+    private val velocityByPointerId =
+        IntArray(MusicalConstants.MAX_POINTER_ID + 1) { MusicalConstants.DEFAULT_VELOCITY }
+
+    // Continuous per-slot messages (no allocations).
+    private val pendingAftertouch = IntArray(MusicalConstants.MAX_VOICES)
+    private val lastSentAftertouch = IntArray(MusicalConstants.MAX_VOICES) { -1 }
+
+    private val pendingPitchBend =
+        IntArray(MusicalConstants.MAX_VOICES) { MusicalConstants.CENTER_PITCH_BEND }
+    private val lastSentPitchBend = IntArray(MusicalConstants.MAX_VOICES) { -1 }
+
+    private val pendingCC74 =
+        IntArray(MusicalConstants.MAX_VOICES) { MusicalConstants.CENTER_CC74 }
+    private val lastSentCC74 = IntArray(MusicalConstants.MAX_VOICES) { -1 }
+
+    // Last harmony snapshot that affects mapping (keeps hot path stable).
+    private var lastRootPc = Int.MIN_VALUE
+    private var lastFingerCount = Int.MIN_VALUE
+    private var lastTriad = Int.MIN_VALUE
+    private var lastSeventh = Int.MIN_VALUE
+    private var lastUnstable = false
+
+    /**
+     * Primary update (safe to call every frame; no allocations).
+     *
+     * @param input Harmonic state (layered).
+     * @param activePointerIds slot-aligned pointerIds; TouchFrame.INVALID_ID for empty slots.
+     */
+    fun update(input: HarmonicState, activePointerIds: IntArray) {
+        val harmonicChanged =
+            input.rootPc != lastRootPc ||
+                    input.fingerCount != lastFingerCount ||
+                    input.triad != lastTriad ||
+                    input.seventh != lastSeventh ||
+                    (input.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
+
+        if (harmonicChanged) {
+            lastRootPc = input.rootPc
+            lastFingerCount = input.fingerCount
+            lastTriad = input.triad
+            lastSeventh = input.seventh
+            lastUnstable = input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+
+            HarmonicFieldMapV01.fillRoleNotes(input, roleNotes)
+        }
+
+        updateAllocationBySlot(activePointerIds)
+        updateRolesByFingerChanges()
+        updateTargetsByRole()
+        solveAndSendBySlot()
+        flushContinuous()
+    }
+
+    /**
+     * Flush all continuous expression (Aftertouch + Pitch Bend + CC74).
+     * Safe to call every frame (deduped by lastSent arrays).
+     */
+    fun flushContinuous() {
+        flushAftertouch()
+        flushPitchBend()
+        flushCC74()
+    }
+
+    /**
+     * Velocity latch. Also "primes" pointer->slot mapping if the slot has not been bound yet.
+     */
+    fun setSlotVelocity(slotIndex: Int, pointerId: Int, velocity: Int) {
+        if (slotIndex !in 0 until MusicalConstants.MAX_VOICES) return
+        val pidOk = pointerId in 0 until velocityByPointerId.size
+        if (pidOk) velocityByPointerId[pointerId] = velocity.coerceIn(1, 127)
+
+        val v = voices[slotIndex]
+        if (v.pointerId == TouchFrame.INVALID_ID && pointerId != TouchFrame.INVALID_ID) {
+            v.pointerId = pointerId
+        }
+    }
+
+    fun setSlotAftertouch(slotIndex: Int, pointerId: Int, value: Int) {
+        if (slotIndex !in 0 until MusicalConstants.MAX_VOICES) return
+        pendingAftertouch[slotIndex] = value.coerceIn(0, 127)
+
+        val v = voices[slotIndex]
+        if (v.pointerId == TouchFrame.INVALID_ID && pointerId != TouchFrame.INVALID_ID) {
+            v.pointerId = pointerId
+        }
+    }
+
+    fun setSlotPitchBend(slotIndex: Int, pointerId: Int, bend14: Int) {
+        if (slotIndex !in 0 until MusicalConstants.MAX_VOICES) return
+        pendingPitchBend[slotIndex] = bend14.coerceIn(0, 16383)
+
+        val v = voices[slotIndex]
+        if (v.pointerId == TouchFrame.INVALID_ID && pointerId != TouchFrame.INVALID_ID) {
+            v.pointerId = pointerId
+        }
+    }
+
+    fun setSlotCC74(slotIndex: Int, pointerId: Int, value: Int) {
+        if (slotIndex !in 0 until MusicalConstants.MAX_VOICES) return
+        pendingCC74[slotIndex] = value.coerceIn(0, 127)
+
+        val v = voices[slotIndex]
+        if (v.pointerId == TouchFrame.INVALID_ID && pointerId != TouchFrame.INVALID_ID) {
+            v.pointerId = pointerId
+        }
+    }
+
+    fun flushAftertouch() {
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val v = pendingAftertouch[i]
+            if (v == lastSentAftertouch[i]) continue
+            lastSentAftertouch[i] = v
+            output.channelPressure(i, v) // CHANGED
+        }
+    }
+
+    private fun flushPitchBend() {
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val v = pendingPitchBend[i]
+            if (v == lastSentPitchBend[i]) continue
+            lastSentPitchBend[i] = v
+            output.pitchBend(i, v) // CHANGED
+        }
+    }
+
+    private fun flushCC74() {
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val v = pendingCC74[i]
+            if (v == lastSentCC74[i]) continue
+            lastSentCC74[i] = v
+            output.cc(i, 74, v) // CHANGED
+        }
+    }
+
+    /**
+     * Role assignment:
+     * - New fingers get the next available role (no replacement).
+     * - On finger removal, roles are compacted in ascending prior-role order, so
+     * the remaining finger(s) become roles 0..N-1.
+     *
+     * This guarantees: 1 finger always becomes the reference/root role (role 0).
+     */
+    private fun updateRolesByFingerChanges() {
+        // Build active slot list
+        var nActive = 0
+        for (slot in 0 until MusicalConstants.MAX_VOICES) {
+            if (voices[slot].pointerId != TouchFrame.INVALID_ID) {
+                activeSlotsScratch[nActive] = slot
+                nActive++
+            } else {
+                roleBySlot[slot] = -1
+            }
+        }
+
+        if (nActive == 0) {
+            lastActiveCount = 0
+            return
+        }
+
+        // Used roles bitmask among currently active slots
+        var usedMask = 0
+        for (i in 0 until nActive) {
+            val slot = activeSlotsScratch[i]
+            val r = roleBySlot[slot]
+            if (r in 0..3) usedMask = usedMask or (1 shl r)
+        }
+
+        if (nActive > lastActiveCount) {
+            // Addition: assign next roles to newly active slots (role==-1), deterministic by slot order.
+            for (i in 0 until nActive) {
+                val slot = activeSlotsScratch[i]
+                if (roleBySlot[slot] != -1) continue
+
+                var nextRole = -1
+                for (r in 0..3) {
+                    if ((usedMask and (1 shl r)) == 0) {
+                        nextRole = r
+                        break
+                    }
+                }
+                // If roles 0..3 are all used, leave as -1 (extra finger is silent in v0.1).
+                if (nextRole != -1) {
+                    roleBySlot[slot] = nextRole
+                    usedMask = usedMask or (1 shl nextRole)
+                }
+            }
+        } else if (nActive < lastActiveCount) {
+            // Removal: compact roles by ascending prior-role.
+            // Insertion sort activeSlotsScratch by roleBySlot[slot].
+            for (i in 1 until nActive) {
+                val s = activeSlotsScratch[i]
+                val rS = roleRank(roleBySlot[s])
+                var j = i - 1
+                while (j >= 0) {
+                    val sj = activeSlotsScratch[j]
+                    val rJ = roleRank(roleBySlot[sj])
+                    if (rJ <= rS) break
+                    activeSlotsScratch[j + 1] = sj
+                    j--
+                }
+                activeSlotsScratch[j + 1] = s
+            }
+
+            // Reassign roles 0..(nActive-1) up to 3. Anything beyond is silent.
+            for (i in 0 until nActive) {
+                val slot = activeSlotsScratch[i]
+                roleBySlot[slot] = if (i <= 3) i else -1
+            }
+        } else {
+            // Same count: keep roles.
+            // If any active slot is missing a role (rare), assign next available deterministically.
+            for (i in 0 until nActive) {
+                val slot = activeSlotsScratch[i]
+                if (roleBySlot[slot] != -1) continue
+                var nextRole = -1
+                for (r in 0..3) {
+                    if ((usedMask and (1 shl r)) == 0) {
+                        nextRole = r
+                        break
+                    }
+                }
+                if (nextRole != -1) {
+                    roleBySlot[slot] = nextRole
+                    usedMask = usedMask or (1 shl nextRole)
+                }
+            }
+        }
+
+        lastActiveCount = nActive
+    }
+
+    private fun roleRank(role: Int): Int {
+        return if (role in 0..3) role else 999
+    }
+
+    private fun updateTargetsByRole() {
+        for (slot in 0 until MusicalConstants.MAX_VOICES) {
+            val pid = voices[slot].pointerId
+            if (pid == TouchFrame.INVALID_ID) {
+                targetNotes[slot] = 0
+                continue
+            }
+
+            val role = roleBySlot[slot]
+            targetNotes[slot] = if (role in 0..3) roleNotes[role] else 0
+        }
+    }
+
+    /**
+     * Slot-stable binding:
+     * - Each slot reads activePointerIds[slot] (or INVALID_ID).
+     * - PointerId changes in a slot force an immediate note-off (deterministic).
+     */
+    private fun updateAllocationBySlot(activePointerIds: IntArray) {
+        val n = minOf(activePointerIds.size, MusicalConstants.MAX_VOICES)
+
+        for (slot in 0 until MusicalConstants.MAX_VOICES) {
+            val wantPid = if (slot < n) activePointerIds[slot] else TouchFrame.INVALID_ID
+            val v = voices[slot]
+            val havePid = v.pointerId
+
+            if (wantPid == TouchFrame.INVALID_ID) {
+                // Slot empty -> release and clear binding.
+                if (v.active) {
+                    output.noteOff(slot, v.note) // CHANGED
+                    v.active = false
+                    v.note = 0
+                }
+                v.pointerId = TouchFrame.INVALID_ID
+                continue
+            }
+
+            // Slot occupied.
+            if (havePid == TouchFrame.INVALID_ID) {
+                v.pointerId = wantPid
+                continue
+            }
+
+            if (havePid != wantPid) {
+                // Different pointer landed in this slot -> deterministic rebind.
+                if (v.active) {
+                    output.noteOff(slot, v.note) // CHANGED
+                    v.active = false
+                    v.note = 0
+                }
+                v.pointerId = wantPid
+            }
+        }
+    }
+
+    /**
+     * Sends notes based on slot targets.
+     * No sorting, no allocations.
+     */
+    private fun solveAndSendBySlot() {
+        for (slot in 0 until MusicalConstants.MAX_VOICES) {
+            val v = voices[slot]
+            val pid = v.pointerId
+            if (pid == TouchFrame.INVALID_ID) continue
+
+            val target = targetNotes[slot]
+            if (target == 0) {
+                if (v.active) {
+                    output.noteOff(slot, v.note) // CHANGED
+                    v.active = false
+                    v.note = 0
+                }
+                continue
+            }
+
+            if (!v.active) {
+                val vel = if (pid in 0 until velocityByPointerId.size)
+                    velocityByPointerId[pid]
+                else
+                    MusicalConstants.DEFAULT_VELOCITY
+
+                v.note = target
+                v.active = true
+                output.noteOn(slot, target, vel) // CHANGED
+                continue
+            }
+
+            if (v.note != target) {
+                output.noteOff(slot, v.note) // CHANGED
+
+                val vel = if (pid in 0 until velocityByPointerId.size)
+                    velocityByPointerId[pid]
+                else
+                    MusicalConstants.DEFAULT_VELOCITY
+
+                v.note = target
+                output.noteOn(slot, target, vel) // CHANGED
+            }
+        }
+    }
+
+    fun allNotesOff() {
+        // Delegate to output implementation for proper cleanup
+        output.allNotesOff() // CHANGED: Simplified delegation
+
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val v = voices[i]
+            // We do NOT call output.noteOff here anymore because output.allNotesOff() handles it better
+            // just reset internal state:
+            v.note = 0
+            v.active = false
+            v.pointerId = TouchFrame.INVALID_ID
+
+            targetNotes[i] = 0
+            roleBySlot[i] = -1
+
+            pendingAftertouch[i] = 0
+            lastSentAftertouch[i] = -1
+
+            pendingPitchBend[i] = MusicalConstants.CENTER_PITCH_BEND
+            lastSentPitchBend[i] = -1
+
+            pendingCC74[i] = MusicalConstants.CENTER_CC74
+            lastSentCC74[i] = -1
+        }
+
+        // Reset velocity cache to default values
+        for (i in 0 until velocityByPointerId.size) {
+            velocityByPointerId[i] = MusicalConstants.DEFAULT_VELOCITY
+        }
+
+        // Clear roles + counts
+        lastActiveCount = 0
+        roleNotes[0] = 0
+        roleNotes[1] = 0
+        roleNotes[2] = 0
+        roleNotes[3] = 0
+
+        lastRootPc = Int.MIN_VALUE
+        lastFingerCount = Int.MIN_VALUE
+        lastTriad = Int.MIN_VALUE
+        lastSeventh = Int.MIN_VALUE
+        lastUnstable = false
+    }
+
+    fun close() {
+        allNotesOff()
+        output.close() // CHANGED
+    }
+}
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\commonMain\kotlin\com\breathinghand\shared\Platform.kt
+
+package com.breathinghand.shared
+
+expect fun platform(): String
+
+
+
+FILE: C:\Users\user\AndroidStudioProjects\Breathinghand\shared\src\iosMain\kotlin\com\breathinghand\shared\Platform.ios.kt
+
+package com.breathinghand.shared
+
+actual fun platform() = "iOS"
+
+
+

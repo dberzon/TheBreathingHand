@@ -1,0 +1,806 @@
+Adding Sound & MIDI Mode Selection
+Great questions! Let me break this down:
+
+MPE vs Standard MIDI - Why It Matters
+Aspect	MPE (Current)	Standard MIDI
+Channels	1 per finger (ch 1-5)	Single channel (ch 1)
+Pitch Bend	Per-note	Affects ALL notes
+Aftertouch	Per-note (channel pressure)	Polyphonic or shared
+Synth Complexity	High (5 independent voices)	Low (1 polyphonic voice)
+Use Case	External MPE synths	Internal synth, basic hardware
+Your instinct is correct - for a built-in synth, Standard MIDI is much simpler to implement.
+
+Architecture: Mode Selection
+1. Create MIDI Mode Enum
+New file: shared/.../core/MidiMode.kt
+
+Kotlin
+
+package com.breathinghand.core
+
+enum class MidiMode {
+    MPE,        // Current behavior: channel per voice
+    STANDARD    // Single channel, polyphonic
+}
+2. Create Output Abstraction
+New file: shared/.../core/MidiOutput.kt
+
+Kotlin
+
+package com.breathinghand.core
+
+import com.breathinghand.core.midi.MidiOut
+
+/**
+ * Abstraction over MIDI output that handles both MPE and Standard modes.
+ * VoiceLeader talks to this instead of MidiOut directly.
+ */
+interface MidiOutput {
+    fun noteOn(slot: Int, note: Int, velocity: Int)
+    fun noteOff(slot: Int, note: Int)
+    fun pitchBend(slot: Int, bend14: Int)
+    fun channelPressure(slot: Int, pressure: Int)
+    fun cc(slot: Int, ccNum: Int, value: Int)
+    fun allNotesOff()
+    fun close()
+}
+
+/**
+ * MPE Mode: Each slot gets its own MIDI channel (current behavior)
+ */
+class MpeMidiOutput(private val midi: MidiOut) : MidiOutput {
+    
+    override fun noteOn(slot: Int, note: Int, velocity: Int) {
+        val channel = slot + 1  // Slots 0-4 → Channels 1-5
+        midi.sendNoteOn(channel, note, velocity)
+    }
+    
+    override fun noteOff(slot: Int, note: Int) {
+        val channel = slot + 1
+        midi.sendNoteOff(channel, note)
+    }
+    
+    override fun pitchBend(slot: Int, bend14: Int) {
+        val channel = slot + 1
+        midi.sendPitchBend(channel, bend14)
+    }
+    
+    override fun channelPressure(slot: Int, pressure: Int) {
+        val channel = slot + 1
+        midi.sendChannelPressure(channel, pressure)
+    }
+    
+    override fun cc(slot: Int, ccNum: Int, value: Int) {
+        val channel = slot + 1
+        midi.sendCC(channel, ccNum, value)
+    }
+    
+    override fun allNotesOff() {
+        for (ch in 1..MusicalConstants.MAX_VOICES) {
+            midi.sendCC(ch, 123, 0)  // All Notes Off
+            midi.sendPitchBend(ch, MusicalConstants.CENTER_PITCH_BEND)
+        }
+    }
+    
+    override fun close() = midi.close()
+}
+
+/**
+ * Standard Mode: All notes on channel 1, shared expression
+ */
+class StandardMidiOutput(private val midi: MidiOut) : MidiOutput {
+    
+    private val channel = 1
+    
+    // Track active notes for proper note-off
+    private val activeNotes = mutableSetOf<Int>()
+    
+    override fun noteOn(slot: Int, note: Int, velocity: Int) {
+        activeNotes.add(note)
+        midi.sendNoteOn(channel, note, velocity)
+    }
+    
+    override fun noteOff(slot: Int, note: Int) {
+        if (activeNotes.remove(note)) {
+            midi.sendNoteOff(channel, note)
+        }
+    }
+    
+    override fun pitchBend(slot: Int, bend14: Int) {
+        // Only apply pitch bend from slot 0 (primary finger)
+        // Otherwise all notes would bend together chaotically
+        if (slot == 0) {
+            midi.sendPitchBend(channel, bend14)
+        }
+    }
+    
+    override fun channelPressure(slot: Int, pressure: Int) {
+        // Use maximum pressure from any finger
+        // (Could also average, but max feels more responsive)
+        if (slot == 0) {
+            midi.sendChannelPressure(channel, pressure)
+        }
+    }
+    
+    override fun cc(slot: Int, ccNum: Int, value: Int) {
+        if (slot == 0) {
+            midi.sendCC(channel, ccNum, value)
+        }
+    }
+    
+    override fun allNotesOff() {
+        for (note in activeNotes) {
+            midi.sendNoteOff(channel, note)
+        }
+        activeNotes.clear()
+        midi.sendPitchBend(channel, MusicalConstants.CENTER_PITCH_BEND)
+        midi.sendCC(channel, 123, 0)
+    }
+    
+    override fun close() {
+        allNotesOff()
+        midi.close()
+    }
+}
+3. Update VoiceLeader
+Modify: VoiceLeader.kt
+
+Kotlin
+
+// Change constructor to accept MidiOutput instead of MidiOut
+class VoiceLeader(private val output: MidiOutput) {
+    
+    // Replace all midi.sendNoteOn calls:
+    // OLD: midi.sendNoteOn(v.channel, target, vel)
+    // NEW: output.noteOn(slot, target, vel)
+    
+    private fun solveAndSendBySlot() {
+        for (slot in 0 until MusicalConstants.MAX_VOICES) {
+            val v = voices[slot]
+            val pid = v.pointerId
+            if (pid == TouchFrame.INVALID_ID) continue
+
+            val target = targetNotes[slot]
+            if (target == 0) {
+                if (v.active) {
+                    output.noteOff(slot, v.note)  // Changed
+                    v.active = false
+                    v.note = 0
+                }
+                continue
+            }
+
+            if (!v.active) {
+                val vel = if (pid in velocityByPointerId.indices)
+                    velocityByPointerId[pid]
+                else
+                    MusicalConstants.DEFAULT_VELOCITY
+
+                v.note = target
+                v.active = true
+                output.noteOn(slot, target, vel)  // Changed
+                continue
+            }
+
+            if (v.note != target) {
+                output.noteOff(slot, v.note)  // Changed
+                val vel = if (pid in velocityByPointerId.indices)
+                    velocityByPointerId[pid]
+                else
+                    MusicalConstants.DEFAULT_VELOCITY
+                v.note = target
+                output.noteOn(slot, target, vel)  // Changed
+            }
+        }
+    }
+    
+    // Similarly update flushAftertouch, flushPitchBend, flushCC74...
+    private fun flushAftertouch() {
+        for (i in 0 until MusicalConstants.MAX_VOICES) {
+            val v = pendingAftertouch[i]
+            if (v == lastSentAftertouch[i]) continue
+            lastSentAftertouch[i] = v
+            output.channelPressure(i, v)  // Changed
+        }
+    }
+    
+    fun allNotesOff() {
+        output.allNotesOff()  // Simplified!
+        // ... reset internal state ...
+    }
+    
+    fun close() {
+        allNotesOff()
+        output.close()
+    }
+}
+4. Mode Selection Dialog
+New file: app/.../ModeSelectionActivity.kt
+
+Kotlin
+
+package com.breathinghand
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.breathinghand.core.MidiMode
+
+class ModeSelectionActivity : AppCompatActivity() {
+    
+    companion object {
+        const val EXTRA_MIDI_MODE = "midi_mode"
+        const val EXTRA_USE_INTERNAL_SYNTH = "use_internal_synth"
+    }
+    
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 96, 48, 48)
+        }
+        
+        val title = TextView(this).apply {
+            text = "Breathinghand"
+            textSize = 28f
+            setPadding(0, 0, 0, 48)
+        }
+        layout.addView(title)
+        
+        val subtitle = TextView(this).apply {
+            text = "Choose output mode:"
+            textSize = 18f
+            setPadding(0, 0, 0, 32)
+        }
+        layout.addView(subtitle)
+        
+        // Option 1: Internal Synth (Standard MIDI)
+        val btnInternal = Button(this).apply {
+            text = "🎹 Built-in Synth\n(No external devices needed)"
+            textSize = 16f
+            setPadding(24, 24, 24, 24)
+            setOnClickListener {
+                launchMain(MidiMode.STANDARD, useInternalSynth = true)
+            }
+        }
+        layout.addView(btnInternal)
+        
+        // Option 2: External Standard MIDI
+        val btnStandard = Button(this).apply {
+            text = "🔌 External MIDI\n(Standard - single channel)"
+            textSize = 16f
+            setPadding(24, 24, 24, 24)
+            setOnClickListener {
+                launchMain(MidiMode.STANDARD, useInternalSynth = false)
+            }
+        }
+        layout.addView(btnStandard)
+        
+        // Option 3: External MPE MIDI
+        val btnMpe = Button(this).apply {
+            text = "🎛️ External MPE MIDI\n(Per-note expression)"
+            textSize = 16f
+            setPadding(24, 24, 24, 24)
+            setOnClickListener {
+                launchMain(MidiMode.MPE, useInternalSynth = false)
+            }
+        }
+        layout.addView(btnMpe)
+        
+        setContentView(layout)
+    }
+    
+    private fun launchMain(mode: MidiMode, useInternalSynth: Boolean) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            putExtra(EXTRA_MIDI_MODE, mode.name)
+            putExtra(EXTRA_USE_INTERNAL_SYNTH, useInternalSynth)
+        }
+        startActivity(intent)
+        finish()
+    }
+}
+Update AndroidManifest.xml:
+
+XML
+
+<activity
+    android:name=".ModeSelectionActivity"
+    android:exported="true">
+    <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+    </intent-filter>
+</activity>
+
+<activity
+    android:name=".MainActivity"
+    android:exported="false" />
+5. Update MainActivity
+Kotlin
+
+class MainActivity : AppCompatActivity() {
+    
+    private var midiMode: MidiMode = MidiMode.STANDARD
+    private var useInternalSynth: Boolean = false
+    private var internalSynth: SimpleSynth? = null
+    
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        // Read mode from intent
+        midiMode = MidiMode.valueOf(
+            intent.getStringExtra(ModeSelectionActivity.EXTRA_MIDI_MODE) 
+                ?: MidiMode.STANDARD.name
+        )
+        useInternalSynth = intent.getBooleanExtra(
+            ModeSelectionActivity.EXTRA_USE_INTERNAL_SYNTH, 
+            false
+        )
+        
+        // ... existing setup ...
+        
+        if (useInternalSynth) {
+            setupInternalSynth()
+        } else {
+            setupExternalMidi()
+        }
+    }
+    
+    private fun setupInternalSynth() {
+        internalSynth = SimpleSynth(this)
+        internalSynth?.start()
+        
+        val output = InternalSynthOutput(internalSynth!!)
+        voiceLeader = VoiceLeader(output)
+        
+        Toast.makeText(this, "Internal synth active", Toast.LENGTH_SHORT).show()
+    }
+    
+    private fun setupExternalMidi() {
+        // ... existing MIDI setup code ...
+        // But create appropriate MidiOutput based on midiMode:
+        
+        midiManager.openDevice(usbDevice, { device ->
+            if (device != null) {
+                val port = device.openInputPort(0)
+                if (port != null) {
+                    val sink = AndroidMidiSink(port)
+                    val midi = MidiOut(sink, AndroidMonotonicClock, AndroidForensicLogger)
+                    
+                    // Choose output type based on mode
+                    val output: MidiOutput = when (midiMode) {
+                        MidiMode.MPE -> MpeMidiOutput(midi)
+                        MidiMode.STANDARD -> StandardMidiOutput(midi)
+                    }
+                    
+                    voiceLeader = VoiceLeader(output)
+                    runOnUiThread { 
+                        Toast.makeText(this, "MIDI Connected (${midiMode.name})", Toast.LENGTH_SHORT).show() 
+                    }
+                }
+            }
+        }, null)
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        internalSynth?.stop()
+        voiceLeader?.close()
+    }
+}
+Adding the Internal Synth
+Now for the actual sound! Here are options from simplest to most complex:
+
+Option A: Android AudioTrack (Simplest, ~200 lines)
+New file: app/.../synth/SimpleSynth.kt
+
+Kotlin
+
+package com.breathinghand.synth
+
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
+import kotlin.concurrent.thread
+import kotlin.math.PI
+import kotlin.math.sin
+
+/**
+ * Minimal polyphonic synthesizer using AudioTrack.
+ * Good enough for practice, ~15-30ms latency.
+ */
+class SimpleSynth(
+    private val sampleRate: Int = 44100,
+    private val maxVoices: Int = 5
+) {
+    private var audioTrack: AudioTrack? = null
+    private var isRunning = false
+    private var renderThread: Thread? = null
+    
+    // Voice state (lock-free for hot path)
+    private val voiceNote = IntArray(maxVoices) { 0 }
+    private val voiceVelocity = IntArray(maxVoices) { 0 }
+    private val voicePhase = FloatArray(maxVoices) { 0f }
+    private val voiceActive = BooleanArray(maxVoices) { false }
+    
+    // Envelope state
+    private val voiceEnvelope = FloatArray(maxVoices) { 0f }
+    private val attackRate = 0.005f   // ~5ms attack
+    private val releaseRate = 0.0005f // ~500ms release
+    
+    // Global parameters
+    @Volatile var masterVolume: Float = 0.5f
+    @Volatile var brightness: Float = 0.5f  // CC74 mapped
+    
+    fun start() {
+        if (isRunning) return
+        
+        val bufferSize = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        
+        audioTrack = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(bufferSize)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        
+        isRunning = true
+        audioTrack?.play()
+        
+        renderThread = thread(name = "SynthRender") {
+            renderLoop(bufferSize)
+        }
+    }
+    
+    fun stop() {
+        isRunning = false
+        renderThread?.join(1000)
+        audioTrack?.stop()
+        audioTrack?.release()
+        audioTrack = null
+    }
+    
+    fun noteOn(voice: Int, note: Int, velocity: Int) {
+        if (voice !in 0 until maxVoices) return
+        voiceNote[voice] = note
+        voiceVelocity[voice] = velocity
+        voiceActive[voice] = true
+        // Don't reset phase for smoother transitions
+    }
+    
+    fun noteOff(voice: Int) {
+        if (voice !in 0 until maxVoices) return
+        voiceActive[voice] = false
+        // Envelope will handle release
+    }
+    
+    fun allNotesOff() {
+        for (i in 0 until maxVoices) {
+            voiceActive[i] = false
+        }
+    }
+    
+    private fun renderLoop(bufferSize: Int) {
+        val buffer = ShortArray(bufferSize / 2)
+        
+        while (isRunning) {
+            // Render audio
+            for (i in buffer.indices) {
+                var sample = 0f
+                
+                for (v in 0 until maxVoices) {
+                    sample += renderVoice(v)
+                }
+                
+                // Soft clip
+                sample = sample.coerceIn(-1f, 1f)
+                
+                // Convert to 16-bit
+                buffer[i] = (sample * masterVolume * 32767f).toInt().toShort()
+            }
+            
+            audioTrack?.write(buffer, 0, buffer.size)
+        }
+    }
+    
+    private fun renderVoice(v: Int): Float {
+        // Update envelope
+        val targetEnv = if (voiceActive[v]) 1f else 0f
+        val rate = if (voiceActive[v]) attackRate else releaseRate
+        voiceEnvelope[v] += (targetEnv - voiceEnvelope[v]) * rate
+        
+        if (voiceEnvelope[v] < 0.001f) {
+            return 0f
+        }
+        
+        val note = voiceNote[v]
+        if (note <= 0) return 0f
+        
+        // Calculate frequency
+        val freq = 440f * kotlin.math.pow(2.0, (note - 69) / 12.0).toFloat()
+        val phaseInc = freq / sampleRate
+        
+        // Generate waveform (saw + filtered by brightness)
+        voicePhase[v] = (voicePhase[v] + phaseInc) % 1f
+        
+        // Simple saw wave with harmonics controlled by brightness
+        val saw = 2f * voicePhase[v] - 1f
+        
+        // Basic low-pass via mixing with sine (crude but effective)
+        val sine = sin(2.0 * PI * voicePhase[v]).toFloat()
+        val mix = saw * brightness + sine * (1f - brightness)
+        
+        // Apply envelope and velocity
+        val vel = voiceVelocity[v] / 127f
+        return mix * voiceEnvelope[v] * vel * 0.2f  // 0.2 = per-voice gain
+    }
+}
+Option B: Oboe (Lower Latency, ~100 lines + NDK)
+For latency under 10ms, use Oboe:
+
+Add to app/build.gradle.kts:
+
+Kotlin
+
+android {
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+}
+Create app/src/main/cpp/CMakeLists.txt:
+
+cmake
+
+cmake_minimum_required(VERSION 3.18)
+project(breathinghand_synth)
+
+find_package(oboe REQUIRED CONFIG)
+
+add_library(synth_native SHARED
+    synth.cpp
+)
+
+target_link_libraries(synth_native
+    oboe::oboe
+    log
+)
+Create app/src/main/cpp/synth.cpp:
+
+C++
+
+#include <oboe/Oboe.h>
+#include <jni.h>
+#include <cmath>
+#include <array>
+
+class SynthEngine : public oboe::AudioStreamCallback {
+public:
+    static constexpr int MAX_VOICES = 5;
+    
+    struct Voice {
+        int note = 0;
+        float velocity = 0;
+        float phase = 0;
+        float envelope = 0;
+        bool active = false;
+    };
+    
+    std::array<Voice, MAX_VOICES> voices;
+    float sampleRate = 48000;
+    float masterVolume = 0.5f;
+    
+    oboe::DataCallbackResult onAudioReady(
+        oboe::AudioStream* stream,
+        void* audioData,
+        int32_t numFrames
+    ) override {
+        auto* output = static_cast<float*>(audioData);
+        
+        for (int i = 0; i < numFrames; i++) {
+            float sample = 0;
+            
+            for (auto& v : voices) {
+                sample += renderVoice(v);
+            }
+            
+            output[i] = std::clamp(sample * masterVolume, -1.0f, 1.0f);
+        }
+        
+        return oboe::DataCallbackResult::Continue;
+    }
+    
+private:
+    float renderVoice(Voice& v) {
+        float target = v.active ? 1.0f : 0.0f;
+        float rate = v.active ? 0.01f : 0.001f;
+        v.envelope += (target - v.envelope) * rate;
+        
+        if (v.envelope < 0.001f || v.note <= 0) return 0;
+        
+        float freq = 440.0f * std::pow(2.0f, (v.note - 69) / 12.0f);
+        float phaseInc = freq / sampleRate;
+        v.phase = std::fmod(v.phase + phaseInc, 1.0f);
+        
+        float saw = 2.0f * v.phase - 1.0f;
+        return saw * v.envelope * v.velocity * 0.15f;
+    }
+};
+
+static SynthEngine engine;
+static std::shared_ptr<oboe::AudioStream> stream;
+
+extern "C" {
+
+JNIEXPORT void JNICALL
+Java_com_breathinghand_synth_OboeSynth_nativeStart(JNIEnv*, jobject) {
+    oboe::AudioStreamBuilder builder;
+    builder.setDirection(oboe::Direction::Output)
+           ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+           ->setSharingMode(oboe::SharingMode::Exclusive)
+           ->setFormat(oboe::AudioFormat::Float)
+           ->setChannelCount(1)
+           ->setCallback(&engine);
+    
+    builder.openStream(stream);
+    engine.sampleRate = stream->getSampleRate();
+    stream->requestStart();
+}
+
+JNIEXPORT void JNICALL
+Java_com_breathinghand_synth_OboeSynth_nativeStop(JNIEnv*, jobject) {
+    if (stream) {
+        stream->requestStop();
+        stream->close();
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_breathinghand_synth_OboeSynth_nativeNoteOn(JNIEnv*, jobject, jint voice, jint note, jint velocity) {
+    if (voice >= 0 && voice < SynthEngine::MAX_VOICES) {
+        engine.voices[voice].note = note;
+        engine.voices[voice].velocity = velocity / 127.0f;
+        engine.voices[voice].active = true;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_breathinghand_synth_OboeSynth_nativeNoteOff(JNIEnv*, jobject, jint voice) {
+    if (voice >= 0 && voice < SynthEngine::MAX_VOICES) {
+        engine.voices[voice].active = false;
+    }
+}
+
+}
+Kotlin wrapper:
+
+Kotlin
+
+package com.breathinghand.synth
+
+class OboeSynth {
+    init {
+        System.loadLibrary("synth_native")
+    }
+    
+    external fun nativeStart()
+    external fun nativeStop()
+    external fun nativeNoteOn(voice: Int, note: Int, velocity: Int)
+    external fun nativeNoteOff(voice: Int)
+    
+    fun start() = nativeStart()
+    fun stop() = nativeStop()
+    fun noteOn(voice: Int, note: Int, velocity: Int) = nativeNoteOn(voice, note, velocity)
+    fun noteOff(voice: Int) = nativeNoteOff(voice)
+}
+Option C: FluidSynth (Best Sound, Larger Size)
+For realistic instruments using SoundFonts:
+
+Kotlin
+
+// Add dependency
+implementation("com.github.nicholasopuni31:fluidsynth-android:2.2.5")
+
+class FluidSynthWrapper(context: Context) {
+    private val synth = FluidSynth()
+    
+    init {
+        synth.loadSoundFont(context.assets.open("piano.sf2"))
+    }
+    
+    fun noteOn(channel: Int, note: Int, velocity: Int) {
+        synth.noteOn(channel, note, velocity)
+    }
+    
+    fun noteOff(channel: Int, note: Int) {
+        synth.noteOff(channel, note)
+    }
+}
+Connecting Synth to MidiOutput Interface
+New file: app/.../synth/InternalSynthOutput.kt
+
+Kotlin
+
+package com.breathinghand.synth
+
+import com.breathinghand.core.MidiOutput
+import com.breathinghand.core.MusicalConstants
+
+/**
+ * Routes MIDI output to internal synthesizer
+ */
+class InternalSynthOutput(private val synth: SimpleSynth) : MidiOutput {
+    
+    override fun noteOn(slot: Int, note: Int, velocity: Int) {
+        synth.noteOn(slot, note, velocity)
+    }
+    
+    override fun noteOff(slot: Int, note: Int) {
+        synth.noteOff(slot)
+    }
+    
+    override fun pitchBend(slot: Int, bend14: Int) {
+        // SimpleSynth doesn't support pitch bend yet
+        // Could add: synth.setPitchBend(slot, bend14)
+    }
+    
+    override fun channelPressure(slot: Int, pressure: Int) {
+        // Could map to filter or amplitude
+        // synth.setExpression(slot, pressure / 127f)
+    }
+    
+    override fun cc(slot: Int, ccNum: Int, value: Int) {
+        if (ccNum == 74) {
+            synth.brightness = value / 127f
+        }
+    }
+    
+    override fun allNotesOff() {
+        synth.allNotesOff()
+    }
+    
+    override fun close() {
+        synth.stop()
+    }
+}
+Complexity Summary
+Approach	Lines of Code	Latency	Sound Quality	Effort
+AudioTrack (Option A)	~200 Kotlin	15-30ms	Basic	1 day
+Oboe (Option B)	~150 C++ + 50 Kotlin	5-10ms	Basic	2-3 days
+FluidSynth (Option C)	~50 Kotlin	20-40ms	Excellent	1 day + 5MB apk
+Recommended Path
+Phase 1: Mode Selection (2-4 hours)
+Add MidiMode enum
+Add MidiOutput interface + implementations
+Create ModeSelectionActivity
+Update MainActivity to receive mode
+Phase 2: Basic Synth (1 day)
+Implement SimpleSynth with AudioTrack
+Create InternalSynthOutput
+Test with all gesture features
+Phase 3: Polish (optional, 1-2 days)
+Better waveforms (add sine, triangle, square)
+ADSR envelope
+Basic reverb
+Upgrade to Oboe if latency matters
+Would you like me to provide complete, copy-paste-ready code for any of these components?

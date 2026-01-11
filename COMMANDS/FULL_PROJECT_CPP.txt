@@ -1,0 +1,47 @@
+$targetOutputFile = "FULL_PROJECT_CPP.txt"
+$files = Get-ChildItem -Path "." -Filter "*.cpp" -Recurse -File | Sort-Object FullName
+
+if ($files.Count -eq 0) {
+    Write-Host "No .cpp files found!" -ForegroundColor Red
+    pause
+    exit
+}
+
+# Use a StringBuilder for efficient output generation
+$outputContent = New-Object System.Text.StringBuilder
+
+$outputContent.AppendLine("=== FULL KOTLIN PROJECT - ALL FILES WITH SUBFOLDERS ===")
+$outputContent.AppendLine("Generated on $(Get-Date)")
+$outputContent.AppendLine("")
+
+foreach ($file in $files) {
+    $outputContent.AppendLine("════════════════════════════════════════════════════════════")
+    # removes the "./" at start - make sure path is relative and clean
+    $relativePath = $file.FullName
+    if ($relativePath.StartsWith(".\") -or $relativePath.StartsWith("./")) {
+        $relativePath = $relativePath.Substring(2)
+    }
+    $outputContent.AppendLine("FILE: $relativePath")
+    $outputContent.AppendLine("════════════════════════════════════════════════════════════")
+
+    try {
+        # *** THE KEY CHANGE: Specify encoding and use -Raw for robust content retrieval ***
+        # -Raw reads the entire file content as a single string, preserving original line breaks.
+        # -Encoding utf8 ensures Get-Content interprets the source file correctly.
+        $fileContent = Get-Content -Path $file.FullName -Raw -Encoding utf8
+        $outputContent.AppendLine($fileContent)
+    } catch {
+        $outputContent.AppendLine("ERROR: Could not read content from $($file.FullName)")
+        $outputContent.AppendLine("       Error message: $($_.Exception.Message)")
+    }
+    
+    $outputContent.AppendLine("")
+    $outputContent.AppendLine("")
+}
+
+# Write all accumulated content to the file once
+$outputContent.ToString() | Out-File -Encoding utf8 $targetOutputFile
+
+Write-Host ""
+Write-Host "DONE! Created $targetOutputFile with $($files.Count) Kotlin files (including all subfolders)" -ForegroundColor Cyan
+Write-Host "You can now safely upload this single file to chat.qwen.ai, Claude, GPT-4o, etc." -ForegroundColor Green

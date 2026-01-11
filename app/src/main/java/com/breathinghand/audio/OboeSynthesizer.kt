@@ -89,6 +89,15 @@ class OboeSynthesizer {
         }
     }
 
+    /**
+     * Load a SoundFont (SF2) from a filesystem path. Must be called off the audio thread.
+     * Returns true on success, false on failure (or if synth not initialized).
+     */
+    fun loadSoundFontFromPath(path: String): Boolean {
+        if (nativeHandle == 0L) return false
+        return nativeLoadSoundFont(nativeHandle, path)
+    }
+
     private external fun nativeCreate(): Long
     private external fun nativeDelete(handle: Long)
     private external fun nativeStart(handle: Long)
@@ -103,6 +112,7 @@ class OboeSynthesizer {
     private external fun nativeSetWaveform(handle: Long, index: Int)
     private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
     private external fun nativeRegisterSample(handle: Long, buffer: java.nio.ByteBuffer?, size: Long, rootNote: Int, loKey: Int, hiKey: Int, name: String?)
+    private external fun nativeLoadSoundFont(handle: Long, path: String?): Boolean
 
     fun getLoadedSampleNames(): Array<String> {
         if (nativeHandle == 0L) return arrayOf()

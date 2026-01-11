@@ -1,6 +1,9 @@
 #include <jni.h>
 #include <android/log.h>
 #include <oboe/Oboe.h>
+#ifdef HAVE_FLUIDSYNTH
+#include <fluidsynth.h>
+#endif
 #include <atomic>
 #include <array>
 #include <algorithm>
@@ -8,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <string>
 #include "Wavetable.h"
 
 namespace {
@@ -97,53 +101,32 @@ public:
     }
 
     void noteOn(int channel, int note, int velocity) {
-        if (channel < 0 || channel >= kMaxChannels) return;
-        const float freq = midiNoteToHz(note);
-        const float vel = static_cast<float>(velocity) / 127.0f;
-        auto &voice = voices_[channel];
-        voice.baseFreq.store(freq);
-        voice.noteNumber.store(note);
-        voice.targetAmplitude.store(vel * kMaxGain);
-        voice.phase = 0.0f;
-        voice.active.store(true);
-
-        // Reset per-voice wavetable pointer. Choose sample region table if available
-        auto samples = std::atomic_load_explicit(&samplesList_, std::memory_order_acquire);
-        const float* chosenTable = nullptr;
-        if (samples && !samples->empty()) {
-            for (const auto &reg : *samples) {
-                if (!reg) continue;
-                if (note >= reg->loKey && note <= reg->hiKey) {
-                    int band = (note - reg->rootNote) / 12 + kSampleBandMid;
-                    if (band < 0) band = 0;
-                    if (band >= kSampleBandCount) band = kSampleBandCount - 1;
-                    chosenTable = reg->bandTables[band].data();
-                    break;
-                }
-            }
-        }
-        if (chosenTable) {
-            voice.wavetablePtr.store(chosenTable);
-        } else {
-            // clear to indicate default engine tables
-            voice.wavetablePtr.store(nullptr);
-        }
-
-        // Reset envelope for attack
-        voice.envStage = Voice::Attack;
-        voice.envLevel = 0.0f;
-
-        // Initialize filter smoothing from channel target
-        voice.cutoffSmoothed = channels_[channel].filterCutoffHz.load();
-        voice.filtState = 0.0f;
+#ifdef HAVE_FLUIDSYNTH
+        if (!fs_synth_) return;
+        int chan = std::clamp(channel, 0, 15);
+        int vel = std::clamp(velocity, 0, 127);
+        fluid_synth_noteon(fs_synth_, chan, note, vel);
+#else
+        (void)channel; (void)note; (void)velocity;
+#endif
     }
 
-    void noteOff(int channel) {
-        if (channel < 0 || channel >= kMaxChannels) return;
-        // Enter release stage
-        voices_[channel].envStage = Voice::Release;
-        voices_[channel].targetAmplitude.store(0.0f);
+    void noteOff(int channel, int note) {
+#ifdef HAVE_FLUIDSYNTH
+        if (!fs_synth_) return;
+        int chan = std::clamp(channel, 0, 15);
+        fluid_synth_noteoff(fs_synth_, chan, note);
+#else
+        (void)channel; (void)note;
+#endif
     }
+
+    // Expose synth pointer for JNI helpers (non-allocating accessor)
+#ifdef HAVE_FLUIDSYNTH
+    fluid_synth_t *getFluidSynth() { return fs_synth_; }
+#else
+    void *getFluidSynth() { return nullptr; }
+#endif
 
     // Set currently active wavetable by index
     void setWaveform(int index) {
@@ -156,12 +139,42 @@ public:
         loadWavetableFromBuffer(data, size);
     }
 
+    // Load a SoundFont (SF2) from path. Must be called from a non-audio thread. Returns true on success.
+    bool loadSoundFontFromPath(const std::string &path) {
+#ifdef HAVE_FLUIDSYNTH
+        if (!fs_initialized_ || !fs_synth_) return false;
+        // Unload previous SF2 if one is loaded
+        if (loaded_soundfont_id_ >= 0) {
+            // unload and purge presets
+            fluid_synth_sfunload(fs_synth_, loaded_soundfont_id_, 1);
+            loaded_soundfont_id_ = -1;
+        }
+        int id = fluid_synth_sfload(fs_synth_, path.c_str(), 1);
+        if (id < 0) return false;
+        loaded_soundfont_id_ = id;
+        // Optionally set default GM program 0 on channel 0
+        // Note: This is optional and safe to call from non-audio thread
+        fluid_synth_program_change(fs_synth_, 0, 0, 0);
+        return true;
+#else
+        (void)path;
+        return false;
+#endif
+    }
+
     void pitchBend(int channel, int bend14) {
-        if (channel < 0 || channel >= kMaxChannels) return;
-        const int centered = bend14 - 8192;
-        const float semitones = static_cast<float>(centered) / 8192.0f * 2.0f;
-        const float ratio = std::pow(2.0f, semitones / 12.0f);
-        channels_[channel].bendRatio.store(ratio);
+#ifdef HAVE_FLUIDSYNTH
+        if (!fs_synth_) return;
+        int chan = channel;
+        if (chan < 0) chan = 0;
+        if (chan > 15) chan = 15;
+        int pb = bend14 - 8192; // map 0..16383 to -8192..8191
+        if (pb < -8192) pb = -8192;
+        if (pb > 8191) pb = 8191;
+        fluid_synth_pitch_bend(fs_synth_, chan, pb);
+#else
+        (void)channel; (void)bend14;
+#endif
     }
 
     // Public wrapper for registering a mapped sample from a raw buffer
@@ -195,14 +208,27 @@ public:
     }
 
     void channelPressure(int channel, int pressure) {
-        if (channel < 0 || channel >= kMaxChannels) return;
-        channels_[channel].aftertouch.store(static_cast<float>(pressure) / 127.0f);
+#ifdef HAVE_FLUIDSYNTH
+        if (!fs_synth_) return;
+        int chan = channel;
+        if (chan < 0) chan = 0;
+        if (chan > 15) chan = 15;
+        fluid_synth_channel_pressure(fs_synth_, chan, pressure);
+#else
+        (void)channel; (void)pressure;
+#endif
     }
 
     void controlChange(int channel, int cc, int value) {
-        if (channel < 0 || channel >= kMaxChannels) return;
-        if (cc != 74) return;
-        channels_[channel].brightness.store(static_cast<float>(value) / 127.0f);
+#ifdef HAVE_FLUIDSYNTH
+        if (!fs_synth_) return;
+        int chan = channel;
+        if (chan < 0) chan = 0;
+        if (chan > 15) chan = 15;
+        fluid_synth_cc(fs_synth_, chan, cc, value);
+#else
+        (void)channel; (void)cc; (void)value;
+#endif
     }
 
     // Set filter cutoff (Hz) for a channel
@@ -226,131 +252,26 @@ public:
         int32_t numFrames
     ) override {
         auto *output = static_cast<float *>(audioData);
+        const int channels = 2; // stereo interleaved
         if (!isPlaying_.load()) {
-            std::fill(output, output + numFrames, 0.0f);
+            // Zero interleaved buffer: numFrames * channels samples
+            std::fill(output, output + static_cast<size_t>(numFrames) * channels, 0.0f);
             return oboe::DataCallbackResult::Continue;
         }
 
-        const float sampleRate = static_cast<float>(sampleRate_.load());
-        const float attackCoeff = 1.0f - std::exp(-1.0f / (sampleRate * 0.005f));
-        const float releaseCoeff = 1.0f - std::exp(-1.0f / (sampleRate * 0.02f));
-
-        for (int32_t i = 0; i < numFrames; ++i) {
-            float mix = 0.0f;
-            for (int ch = 0; ch < kMaxChannels; ++ch) {
-                auto &voice = voices_[ch];
-                if (!voice.active.load()) {
-                    continue;
-                }
-                const float target = voice.targetAmplitude.load();
-                const float coeff = target > voice.amplitude ? attackCoeff : releaseCoeff;
-                voice.amplitude += (target - voice.amplitude) * coeff;
-
-                if (target <= 0.0f && voice.amplitude < kReleaseEpsilon) {
-                    voice.amplitude = 0.0f;
-                    voice.active.store(false);
-                    continue;
-                }
-
-                const float pitchedFreq = voice.baseFreq.load() * channels_[ch].bendRatio.load();
-                voice.phase += pitchedFreq / sampleRate;
-                if (voice.phase >= 1.0f) {
-                    voice.phase -= 1.0f;
-                }
-
-                // Wavetable lookup (linear interpolation)
-                // Choose table based on active waveform and note number (per-MIDI-note)
-                float tableSample = 0.0f;
-                // Priority: per-voice wavetablePtr (sample mapping) > custom wavetable > builtin per-note wavetables > fallback sine
-                const float* voiceTable = std::atomic_load_explicit(&voice.wavetablePtr, std::memory_order_acquire);
-                if (voiceTable) {
-                    const float idx = voice.phase * static_cast<float>(kWavetableSize);
-                    int i0 = static_cast<int>(idx) % kWavetableSize;
-                    if (i0 < 0) i0 += kWavetableSize;
-                    int i1 = (i0 + 1) % kWavetableSize;
-                    const float frac = idx - static_cast<float>(i0);
-                    tableSample = voiceTable[i0] * (1.0f - frac) + voiceTable[i1] * frac;
-                } else {
-                    int waveId = activeWaveformId_.load();
-                    if (waveId == WAVE_CUSTOM_ID) {
-                        auto wav = std::atomic_load_explicit(&customWavetable_, std::memory_order_acquire);
-                        if (wav) {
-                            tableSample = wav->render(voice.phase);
-                        } else {
-                            tableSample = std::sinf(kTwoPi * voice.phase);
-                        }
-                    } else {
-                        int note = voice.noteNumber.load();
-                        if (note < 0 || note >= kNumNotes) note = 69; // default to A4 if unknown
-                        const float* table = tablePtrs_[waveId][note];
-                        if (table) {
-                            const float idx = voice.phase * static_cast<float>(kWavetableSize);
-                            int i0 = static_cast<int>(idx) % kWavetableSize;
-                            if (i0 < 0) i0 += kWavetableSize;
-                            int i1 = (i0 + 1) % kWavetableSize;
-                            const float frac = idx - static_cast<float>(i0);
-                            tableSample = table[i0] * (1.0f - frac) + table[i1] * frac;
-                        } else {
-                            tableSample = std::sinf(kTwoPi * voice.phase);
-                        }
-                    }
-                }
-                const float aftertouch = 0.5f + 0.5f * channels_[ch].aftertouch.load();
-
-                // --- Envelope processing (per-voice) ---
-                const float attackMs = channels_[ch].attackMs.load();
-                const float decayMs = channels_[ch].decayMs.load();
-                const float sustain = channels_[ch].sustainLevel.load();
-                const float releaseMs = channels_[ch].releaseMs.load();
-
-                const float attackSec = std::max(0.001f, attackMs * 0.001f);
-                const float decaySec = std::max(0.001f, decayMs * 0.001f);
-                const float releaseSec = std::max(0.001f, releaseMs * 0.001f);
-
-                const float attackCoeff = 1.0f - std::exp(-1.0f / (sampleRate * attackSec));
-                const float decayCoeff = 1.0f - std::exp(-1.0f / (sampleRate * decaySec));
-                const float releaseCoeff = 1.0f - std::exp(-1.0f / (sampleRate * releaseSec));
-
-                // Advance envelope stage
-                if (voice.envStage == Voice::Attack) {
-                    voice.envLevel += (1.0f - voice.envLevel) * attackCoeff;
-                    if (voice.envLevel >= 0.999f) {
-                        voice.envLevel = 1.0f;
-                        voice.envStage = Voice::Decay;
-                    }
-                } else if (voice.envStage == Voice::Decay) {
-                    voice.envLevel += (sustain - voice.envLevel) * decayCoeff;
-                    if (std::fabs(voice.envLevel - sustain) < 0.001f) {
-                        voice.envLevel = sustain;
-                        voice.envStage = Voice::Sustain;
-                    }
-                } else if (voice.envStage == Voice::Sustain) {
-                    voice.envLevel = sustain;
-                } else if (voice.envStage == Voice::Release) {
-                    voice.envLevel += (0.0f - voice.envLevel) * releaseCoeff;
-                    if (voice.envLevel <= 1e-5f) {
-                        voice.envLevel = 0.0f;
-                        voice.active.store(false);
-                        continue;
-                    }
-                }
-
-                // Apply envelope to oscillator amplitude
-                float rawSample = tableSample * voice.amplitude * voice.envLevel * aftertouch;
-
-                // --- One-pole lowpass per-voice ---
-                const float cutoffTarget = channels_[ch].filterCutoffHz.load();
-                // Smooth cutoff a little to avoid zipper noise
-                voice.cutoffSmoothed += 0.001f * (cutoffTarget - voice.cutoffSmoothed);
-                const float fc = std::max(20.0f, voice.cutoffSmoothed);
-                const float alpha = 1.0f - std::exp(-2.0f * kTwoPi * fc / sampleRate);
-                voice.filtState += alpha * (rawSample - voice.filtState);
-                float filtered = voice.filtState;
-
-                mix += filtered;
-            }
-            output[i] = mix;
+#ifdef HAVE_FLUIDSYNTH
+        if (fs_synth_) {
+            // Render directly into the interleaved buffer by using offsets and stride=2
+            // left channel starts at offset 0 with increment 2, right starts at offset 1 with increment 2
+            fluid_synth_write_float(fs_synth_, static_cast<int>(numFrames), output, 0, 2, output, 1, 2);
+        } else {
+            // No synth: silence
+            std::fill(output, output + static_cast<size_t>(numFrames) * channels, 0.0f);
         }
+#else
+        // FluidSynth not available: silence
+        std::fill(output, output + static_cast<size_t>(numFrames) * channels, 0.0f);
+#endif
         return oboe::DataCallbackResult::Continue;
     }
 
@@ -424,7 +345,7 @@ private:
             ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
             ->setSharingMode(oboe::SharingMode::Exclusive)
             ->setFormat(oboe::AudioFormat::Float)
-            ->setChannelCount(1)
+            ->setChannelCount(2) // stereo
             ->setCallback(this);
 
         auto result = builder.openStream(stream_);
@@ -433,6 +354,12 @@ private:
         }
 
         sampleRate_.store(stream_->getSampleRate());
+        // If FluidSynth is initialized, ensure its sample rate matches the stream
+#ifdef HAVE_FLUIDSYNTH
+        if (fs_synth_) {
+            fluid_synth_set_sample_rate(fs_synth_, static_cast<int>(sampleRate_.load()));
+        }
+#endif
         stream_->setBufferSizeInFrames(stream_->getFramesPerBurst());
         return true;
     }
@@ -469,6 +396,51 @@ private:
 
     std::atomic<double> sampleRate_{48000.0};
     std::atomic<bool> isPlaying_{false};
+
+#ifdef HAVE_FLUIDSYNTH
+    // FluidSynth state (initialized off the audio thread)
+    fluid_settings_t *fs_settings_ = nullptr;
+    fluid_synth_t *fs_synth_ = nullptr;
+    bool fs_initialized_ = false;
+    int loaded_soundfont_id_ = -1;
+
+    // Initialize FluidSynth (must be called from non-audio thread). Pass empty path to skip loading a soundfont.
+    bool initFluidSynth(const std::string &sf2Path) {
+        if (fs_initialized_) return true;
+        fs_settings_ = new_fluid_settings();
+        if (!fs_settings_) return false;
+        fluid_settings_setnum(fs_settings_, "synth.sample-rate", static_cast<double>(sampleRate_.load()));
+        fs_synth_ = new_fluid_synth(fs_settings_);
+        if (!fs_synth_) {
+            delete_fluid_settings(fs_settings_);
+            fs_settings_ = nullptr;
+            return false;
+        }
+        if (!sf2Path.empty()) {
+            loaded_soundfont_id_ = fluid_synth_sfload(fs_synth_, sf2Path.c_str(), 1);
+            // loaded_soundfont_id_ < 0 indicates failure to load the SF2
+        }
+        fs_initialized_ = true;
+        return true;
+    }
+
+    void shutdownFluidSynth() {
+        if (fs_synth_) {
+            delete_fluid_synth(fs_synth_);
+            fs_synth_ = nullptr;
+        }
+        if (fs_settings_) {
+            delete_fluid_settings(fs_settings_);
+            fs_settings_ = nullptr;
+        }
+        fs_initialized_ = false;
+        loaded_soundfont_id_ = -1;
+    }
+#else
+    // When FluidSynth isn't available, provide no-op implementations and keep pointer accessor returning nullptr.
+    bool initFluidSynth(const std::string & /*sf2Path*/) { return false; }
+    void shutdownFluidSynth() {}
+#endif
 
     // Helper: apply simple zero-phase lowpass to a table (non-realtime, called at load time)
     void lowpassTable(const float *in, float *out, int n, float cutoffHz) {
@@ -646,7 +618,17 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeNoteOn(
     JNIEnv *, jobject, jlong handle, jint channel, jint note, jint velocity) {
     auto *engine = fromHandle(handle);
     if (!engine) return;
-    engine->noteOn(channel, note, velocity);
+#ifdef HAVE_FLUIDSYNTH
+    // Non-allocating, non-blocking direct call to FluidSynth
+    fluid_synth_t *s = engine->getFluidSynth();
+    if (!s) return;
+    int chan = std::clamp(static_cast<int>(channel), 0, 15);
+    int key = static_cast<int>(note);
+    int vel = std::clamp(static_cast<int>(velocity), 0, 127);
+    fluid_synth_noteon(s, chan, key, vel);
+#else
+    (void)engine; (void)channel; (void)note; (void)velocity;
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -654,8 +636,15 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeNoteOff(
     JNIEnv *, jobject, jlong handle, jint channel, jint note) {
     auto *engine = fromHandle(handle);
     if (!engine) return;
-    (void)note;
-    engine->noteOff(channel);
+#ifdef HAVE_FLUIDSYNTH
+    fluid_synth_t *s = engine->getFluidSynth();
+    if (!s) return;
+    int chan = std::clamp(static_cast<int>(channel), 0, 15);
+    int key = static_cast<int>(note);
+    fluid_synth_noteoff(s, chan, key);
+#else
+    (void)engine; (void)channel; (void)note;
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -663,7 +652,19 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativePitchBend(
     JNIEnv *, jobject, jlong handle, jint channel, jint bend14) {
     auto *engine = fromHandle(handle);
     if (!engine) return;
-    engine->pitchBend(channel, bend14);
+#ifdef HAVE_FLUIDSYNTH
+    fluid_synth_t *s = engine->getFluidSynth();
+    if (!s) return;
+    int chan = std::clamp(static_cast<int>(channel), 0, 15);
+    // Clamp incoming 14-bit value (0..16383) and convert to FluidSynth range (-8192..8191)
+    int b = std::clamp(static_cast<int>(bend14), 0, 16383);
+    int pb = b - 8192;
+    if (pb < -8192) pb = -8192;
+    if (pb > 8191) pb = 8191;
+    fluid_synth_pitch_bend(s, chan, pb);
+#else
+    (void)engine; (void)channel; (void)bend14;
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -671,7 +672,15 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeChannelPressure(
     JNIEnv *, jobject, jlong handle, jint channel, jint pressure) {
     auto *engine = fromHandle(handle);
     if (!engine) return;
-    engine->channelPressure(channel, pressure);
+#ifdef HAVE_FLUIDSYNTH
+    fluid_synth_t *s = engine->getFluidSynth();
+    if (!s) return;
+    int chan = std::clamp(static_cast<int>(channel), 0, 15);
+    int p = std::clamp(static_cast<int>(pressure), 0, 127);
+    fluid_synth_channel_pressure(s, chan, p);
+#else
+    (void)engine; (void)channel; (void)pressure;
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -679,7 +688,16 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeControlChange(
     JNIEnv *, jobject, jlong handle, jint channel, jint cc, jint value) {
     auto *engine = fromHandle(handle);
     if (!engine) return;
-    engine->controlChange(channel, cc, value);
+#ifdef HAVE_FLUIDSYNTH
+    fluid_synth_t *s = engine->getFluidSynth();
+    if (!s) return;
+    int chan = std::clamp(static_cast<int>(channel), 0, 15);
+    int ctrl = std::clamp(static_cast<int>(cc), 0, 127);
+    int val = std::clamp(static_cast<int>(value), 0, 127);
+    fluid_synth_cc(s, chan, ctrl, val);
+#else
+    (void)engine; (void)channel; (void)cc; (void)value;
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -704,4 +722,17 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeSetWaveform(
     auto *engine = fromHandle(handle);
     if (!engine) return;
     engine->setWaveform(index);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeLoadSoundFont(
+    JNIEnv *env, jobject, jlong handle, jstring path) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return JNI_FALSE;
+    if (path == nullptr) return JNI_FALSE;
+    const char *pathC = env->GetStringUTFChars(path, nullptr);
+    if (!pathC) return JNI_FALSE;
+    bool ok = engine->loadSoundFontFromPath(std::string(pathC));
+    env->ReleaseStringUTFChars(path, pathC);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }

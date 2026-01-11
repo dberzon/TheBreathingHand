@@ -63,6 +63,7 @@ dependencies {
     implementation("com.google.oboe:oboe:1.7.0")
     implementation(project(":shared"))
     implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
