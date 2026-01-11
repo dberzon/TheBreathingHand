@@ -19,6 +19,7 @@ import com.breathinghand.core.midi.AndroidForensicLogger
 import com.breathinghand.core.midi.AndroidMonotonicClock
 import com.breathinghand.core.midi.AndroidMidiSink
 import com.breathinghand.core.midi.FanOutMidiSink
+import com.breathinghand.core.midi.MonoChannelMidiSink
 import com.breathinghand.core.midi.MidiOut
 import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
@@ -75,6 +76,13 @@ class MainActivity : AppCompatActivity() {
         uri?.let { onSfzPicked(it) }
     }
 
+    // SF2 file picker
+    private val pickSf2Launcher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onSf2Picked(it) }
+    }
+
     // Pick a folder that contains sample files (OpenDocumentTree)
     private val pickSfzFolderLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
@@ -127,7 +135,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         internalSynth = OboeSynthesizer()
-        midiFanOut = FanOutMidiSink(OboeMidiSink(internalSynth))
+        midiFanOut = FanOutMidiSink(MonoChannelMidiSink(OboeMidiSink(internalSynth)))
         activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
 
         // --- NEW UI SETUP ---
@@ -190,6 +198,40 @@ class MainActivity : AppCompatActivity() {
         }
 
         container.addView(routingSwitch)
+
+        // 5. FluidSynth switch (below routing switch)
+        val fluidsynthSwitch = Switch(this)
+        fluidsynthSwitch.textSize = 14f
+        fluidsynthSwitch.setTextColor(-1)
+        fluidsynthSwitch.isChecked = false
+        fluidsynthSwitch.text = "FluidSynth: Off"
+
+        val fsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        // place under routing switch (same top/right alignment with extra offset)
+        fsParams.gravity = Gravity.TOP or Gravity.END
+        fsParams.setMargins(0, 112, 48, 0)
+        fluidsynthSwitch.layoutParams = fsParams
+
+        fluidsynthSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                // Launch SF2 picker (user picks a soundfont)
+                pickSf2Launcher.launch(arrayOf("*/*"))
+            } else {
+                // Turn off: shutdown synth
+                importScope.launch {
+                    val ok = internalSynth.shutdownFluidSynth()
+                    runOnUiThread {
+                        fluidsynthSwitch.text = if (ok) "FluidSynth: Off" else "FluidSynth: Off"
+                        if (ok) Toast.makeText(this@MainActivity, "FluidSynth shutdown", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        container.addView(fluidsynthSwitch)
 
         // Controls overlay (floating)
         val controlsOverlay = ControlsOverlayView(this, internalSynth)
@@ -306,6 +348,11 @@ class MainActivity : AppCompatActivity() {
 
     private val importScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
 
+    // Temporary cache path for loaded soundfonts
+    private fun cachedSf2File(): java.io.File {
+        return java.io.File(cacheDir, "loaded_soundfont.sf2")
+    }
+
     private fun showMappedSampleDialog(uri: android.net.Uri) {
         // Dialog to ask for root, lo, hi (simple numeric inputs)
         val builder = androidx.appcompat.app.AlertDialog.Builder(this)
@@ -421,6 +468,47 @@ class MainActivity : AppCompatActivity() {
             pickSfzFolderLauncher.launch(null)
         } catch (e: java.io.IOException) {
             Toast.makeText(this, "Failed to read SFZ: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun onSf2Picked(uri: android.net.Uri) {
+        // Quick runtime check whether native FluidSynth support is compiled in
+        if (!internalSynth.isFluidSynthCompiled()) {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "FluidSynth support is not included in this build. Add third_party/fluidsynth (headers + per-ABI libs) and rebuild.", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+
+        // Copy SF2 to app cache then init FluidSynth and load it (IO coroutine)
+        importScope.launch {
+            try {
+                val outFile = cachedSf2File()
+                contentResolver.openInputStream(uri)?.use { input ->
+                    java.io.FileOutputStream(outFile).use { out ->
+                        input.copyTo(out)
+                    }
+                }
+
+                // Initialize synth first (non-audio thread)
+                val initOk = internalSynth.initFluidSynth()
+                if (!initOk) {
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Failed to initialize FluidSynth", Toast.LENGTH_LONG).show() }
+                    return@launch
+                }
+
+                val loadOk = internalSynth.loadSoundFontFromPath(outFile.absolutePath)
+                runOnUiThread {
+                    if (loadOk) {
+                        Toast.makeText(this@MainActivity, "Loaded SoundFont", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Failed to load SoundFont", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                runOnUiThread { Toast.makeText(this@MainActivity, "SF2 load failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show() }
+            }
         }
     }
 

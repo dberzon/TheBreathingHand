@@ -139,6 +139,21 @@ public:
         loadWavetableFromBuffer(data, size);
     }
 
+    // Public wrappers for FluidSynth init/shutdown
+    bool initFluidSynthPublic(const std::string &sf2Path) {
+#ifdef HAVE_FLUIDSYNTH
+        return initFluidSynth(sf2Path);
+#else
+        (void)sf2Path; return false;
+#endif
+    }
+
+    void shutdownFluidSynthPublic() {
+#ifdef HAVE_FLUIDSYNTH
+        shutdownFluidSynth();
+#endif
+    }
+
     // Load a SoundFont (SF2) from path. Must be called from a non-audio thread. Returns true on success.
     bool loadSoundFontFromPath(const std::string &path) {
 #ifdef HAVE_FLUIDSYNTH
@@ -154,7 +169,7 @@ public:
         loaded_soundfont_id_ = id;
         // Optionally set default GM program 0 on channel 0
         // Note: This is optional and safe to call from non-audio thread
-        fluid_synth_program_change(fs_synth_, 0, 0, 0);
+        fluid_synth_program_change(fs_synth_, 0, 0);
         return true;
 #else
         (void)path;
@@ -736,3 +751,31 @@ Java_com_breathinghand_audio_OboeSynthesizer_nativeLoadSoundFont(
     env->ReleaseStringUTFChars(path, pathC);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeInitFluidSynth(
+    JNIEnv *, jobject, jlong handle) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return JNI_FALSE;
+    bool ok = engine->initFluidSynthPublic(std::string());
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeShutdownFluidSynth(
+    JNIEnv *, jobject, jlong handle) {
+    auto *engine = fromHandle(handle);
+    if (!engine) return JNI_FALSE;
+    engine->shutdownFluidSynthPublic();
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_breathinghand_audio_OboeSynthesizer_nativeIsFluidSynthCompiled(
+    JNIEnv *, jobject) {
+#ifdef HAVE_FLUIDSYNTH
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+} 

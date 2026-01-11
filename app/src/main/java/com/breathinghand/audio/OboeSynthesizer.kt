@@ -98,6 +98,18 @@ class OboeSynthesizer {
         return nativeLoadSoundFont(nativeHandle, path)
     }
 
+    /** Initialize FluidSynth state (must be called from non-audio thread). */
+    fun initFluidSynth(): Boolean {
+        if (nativeHandle == 0L) return false
+        return nativeInitFluidSynth(nativeHandle)
+    }
+
+    /** Shutdown FluidSynth and free native resources. */
+    fun shutdownFluidSynth(): Boolean {
+        if (nativeHandle == 0L) return false
+        return nativeShutdownFluidSynth(nativeHandle)
+    }
+
     private external fun nativeCreate(): Long
     private external fun nativeDelete(handle: Long)
     private external fun nativeStart(handle: Long)
@@ -113,6 +125,14 @@ class OboeSynthesizer {
     private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
     private external fun nativeRegisterSample(handle: Long, buffer: java.nio.ByteBuffer?, size: Long, rootNote: Int, loKey: Int, hiKey: Int, name: String?)
     private external fun nativeLoadSoundFont(handle: Long, path: String?): Boolean
+    private external fun nativeInitFluidSynth(handle: Long): Boolean
+    private external fun nativeShutdownFluidSynth(handle: Long): Boolean
+
+    /** Returns whether FluidSynth support was compiled into the native library. */
+    fun isFluidSynthCompiled(): Boolean {
+        return nativeIsFluidSynthCompiled()
+    }
+    private external fun nativeIsFluidSynthCompiled(): Boolean
 
     fun getLoadedSampleNames(): Array<String> {
         if (nativeHandle == 0L) return arrayOf()

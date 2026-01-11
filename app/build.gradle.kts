@@ -61,6 +61,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("com.google.oboe:oboe:1.7.0")
+    // FluidSynth AAR (provides Prefab): use + for latest; pin to a specific version for reproducible builds
+    implementation("net.volcanomobile.fluidsynth-android:fluidsynth-android:+")
     implementation(project(":shared"))
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
