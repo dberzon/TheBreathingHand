@@ -53,7 +53,7 @@ class MainActivity : AppCompatActivity() {
     private var externalMidiSink: AndroidMidiSink? = null
 
     private lateinit var overlay: HarmonicOverlayView
-    private lateinit var routingSwitch: Switch // The routing switch (Multi-Channel / Single-Channel)
+    private lateinit var externalRoutingSwitch: Switch // External MIDI selector (MPE multi-channel / General MIDI single-channel)
 
     // Activity result launcher for picking a single audio file (WAV) — simple custom wavetable
     private val pickWavLauncher = registerForActivityResult(
@@ -138,9 +138,14 @@ class MainActivity : AppCompatActivity() {
         midiFanOut = FanOutMidiSink(MonoChannelMidiSink(OboeMidiSink(internalSynth)))
         activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
 
+        // Debug: auto-run self-test if requested via intent extra 'selfTest' (debug only)
+        if (intent?.getBooleanExtra("selfTest", false) == true) {
+            runSelfTest()
+        }
+
         // --- NEW UI SETUP ---
         setupUI()
-        updateMidiRouting(routingSwitch.isChecked)
+        // External routing will be initialized after the switch is created below.
 
         setupMidi()
     }
@@ -165,12 +170,12 @@ class MainActivity : AppCompatActivity() {
         )
         container.addView(overlay)
 
-        // 3. The Routing Switch (Top Layer)
-        routingSwitch = Switch(this)
-        routingSwitch.textSize = 14f
-        routingSwitch.setTextColor(-1) // White text
-        routingSwitch.isChecked = true // Default to Multi-Channel routing (enable internal synth polyphony)
-        routingSwitch.text = if (routingSwitch.isChecked) "Routing: Multi-Channel" else "Routing: Single-Channel"
+        // 3. External MIDI Mode switch (Top Right)
+        externalRoutingSwitch = Switch(this)
+        externalRoutingSwitch.textSize = 14f
+        externalRoutingSwitch.setTextColor(-1) // White text
+        externalRoutingSwitch.isChecked = true // Default to External MPE (multi-channel)
+        externalRoutingSwitch.text = if (externalRoutingSwitch.isChecked) getString(R.string.external_midi_label_mpe) else getString(R.string.external_midi_label_gm)
 
         // Position: Top Right
         val params = FrameLayout.LayoutParams(
@@ -179,25 +184,27 @@ class MainActivity : AppCompatActivity() {
         )
         params.gravity = Gravity.TOP or Gravity.END
         params.setMargins(0, 48, 48, 0) // Margin for status bar
-        routingSwitch.layoutParams = params
+        externalRoutingSwitch.layoutParams = params
 
-        // 4. Handle Routing Switching
-        routingSwitch.setOnCheckedChangeListener { _, isChecked ->
+        // 4. Handle External MIDI Mode Switching (affects external output only)
+        externalRoutingSwitch.setOnCheckedChangeListener { _, isChecked ->
             updateMidiRouting(isChecked)
-            val routingName = if (isChecked) "Multi-Channel" else "Single-Channel"
-            // Update switch label to reflect current routing
-            routingSwitch.text = "Routing: $routingName"
-            Toast.makeText(this, "Routing: $routingName", Toast.LENGTH_SHORT).show()
+            val routingName = if (isChecked) getString(R.string.external_midi_name_mpe) else getString(R.string.external_midi_name_gm)
+            // Update switch label to reflect current external routing
+            externalRoutingSwitch.text = "External MIDI: $routingName"
+            Toast.makeText(this, "External MIDI: $routingName", Toast.LENGTH_SHORT).show()
         }
 
         // Long-press the switch to pick a custom wavetable (.wav). Uses a DirectByteBuffer and hands it to native code.
-        routingSwitch.setOnLongClickListener {
+        externalRoutingSwitch.setOnLongClickListener {
             pickWavLauncher.launch(arrayOf("audio/wav", "audio/*"))
             Toast.makeText(this, "Pick a .wav to load as wavetable", Toast.LENGTH_SHORT).show()
             true
         }
 
-        container.addView(routingSwitch)
+        container.addView(externalRoutingSwitch)
+        // Initialize external routing state (affects external output only; internal synth remains on channel 0)
+        updateMidiRouting(externalRoutingSwitch.isChecked)
 
         // 5. FluidSynth switch (below routing switch)
         val fluidsynthSwitch = Switch(this)
@@ -508,6 +515,42 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 e.printStackTrace()
                 runOnUiThread { Toast.makeText(this@MainActivity, "SF2 load failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    // Debug helper: auto-load a test SF2 from /sdcard/Download/test.sf2 and emit a small MIDI sequence
+    private fun runSelfTest() {
+        importScope.launch {
+            try {
+                android.util.Log.d("BreathingHand", "runSelfTest: Starting self-test (loading /sdcard/Download/test.sf2)")
+                val initOk = internalSynth.initFluidSynth()
+                if (!initOk) {
+                    android.util.Log.e("BreathingHand", "runSelfTest: initFluidSynth() failed")
+                    return@launch
+                }
+                val loadOk = internalSynth.loadSoundFontFromPath("/sdcard/Download/test.sf2")
+                android.util.Log.d("BreathingHand", "runSelfTest: loadSoundFontFromPath -> $loadOk")
+                if (!loadOk) return@launch
+
+                // Emit test MIDI: pitch bend on primary (ch 0), then NOTE ON on ch 5 (should map to ch 0 internally)
+                // pitch bend: send3(status=0xE0|0, lsb=127, msb=127) -> upward bend
+                midiFanOut.send3(0xE0 or 0, 127, 127)
+                kotlinx.coroutines.delay(150)
+
+                // Note on channel 5 (should be remapped to channel 0 for internal synth)
+                midiFanOut.send3(0x90 or 5, 60, 100)
+                kotlinx.coroutines.delay(600)
+
+                // Channel pressure on primary (ch 0) - should affect internal synth
+                midiFanOut.send2(0xD0 or 0, 80)
+                kotlinx.coroutines.delay(300)
+
+                // Note off
+                midiFanOut.send3(0x80 or 5, 60, 0)
+                android.util.Log.d("BreathingHand", "runSelfTest: Sequence complete")
+            } catch (e: Exception) {
+                android.util.Log.e("BreathingHand", "runSelfTest: exception ${'$'}e")
             }
         }
     }

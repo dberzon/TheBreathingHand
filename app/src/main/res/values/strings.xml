@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">Breathing hand</string>
+    <string name="external_midi_label_mpe">External MIDI: MPE (multi-channel)</string>
+    <string name="external_midi_label_gm">External MIDI: General MIDI (single-channel)</string>
+    <string name="external_midi_name_mpe">MPE (multi-channel)</string>
+    <string name="external_midi_name_gm">General MIDI (single-channel)</string>
 </resources>
