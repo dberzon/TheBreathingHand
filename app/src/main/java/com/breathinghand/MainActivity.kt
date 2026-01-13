@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.Choreographer
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -24,8 +25,6 @@ import com.breathinghand.core.midi.MidiOut
 import com.breathinghand.core.midi.OboeMidiSink
 import java.io.IOException
 import kotlinx.coroutines.*
-import android.os.Handler
-import android.os.Looper
 
 class MainActivity : AppCompatActivity() {
 
@@ -46,11 +45,29 @@ class MainActivity : AppCompatActivity() {
     private var r2Px: Float = 0f
     private val startTime = System.nanoTime()
 
-    // Release coalescing: batch near-simultaneous pointer-up events
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var coalesceStartMs: Long = 0L
-    private var isCoalescing: Boolean = false
-    private var coalescedEvent: MotionEvent? = null
+    // Release coalescing (INPUT layer):
+    // Snapshot boundary lives in onTouchEvent(): ingest once -> derive BOTH harmony + activePointerIds from touchFrame.
+    // Coalescing batches near-simultaneous ACTION_POINTER_UP bursts so harmony is recomputed ONCE (no transient states).
+    private val choreographer: Choreographer = Choreographer.getInstance()
+    private var releaseCoalesceActive: Boolean = false
+    private var releaseCoalesceDeadlineMs: Long = 0L
+    private var releaseCoalescePosted: Boolean = false
+    private val releaseCoalesceCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!releaseCoalesceActive) {
+                releaseCoalescePosted = false
+                return
+            }
+            val nowMs = SystemClock.uptimeMillis()
+            if (nowMs < releaseCoalesceDeadlineMs) {
+                choreographer.postFrameCallback(this)
+                return
+            }
+            releaseCoalesceActive = false
+            releaseCoalescePosted = false
+            processTouchSnapshot()
+        }
+    }
 
     @Volatile
     private var voiceLeader: VoiceLeader? = null
@@ -739,53 +756,126 @@ class MainActivity : AppCompatActivity() {
         // at the Activity level, we intercept everything not caught by views.
         // The Switch will handle its own touches. We process the rest for music.
 
-        // Coalescing strategy: batch near-simultaneous POINTER_UP events to eliminate intermediate states.
-        // When multiple fingers lift within ~10ms, we see them as one atomic change.
-        // This ensures activePointerIds and HarmonicState derive from the same TouchFrame snapshot.
+        // SNAPSHOT BOUNDARY:
+        // MotionEvent -> AndroidTouchDriver.ingest() happens exactly once,
+        // then BOTH HarmonicState and activePointerIds are derived from touchFrame (same snapshot).
         val actionMasked = event.actionMasked
 
-        if (actionMasked == MotionEvent.ACTION_POINTER_UP) {
-            val now = android.os.SystemClock.uptimeMillis()
-
-            if (!isCoalescing) {
-                // Start coalescing window
-                isCoalescing = true
-                coalesceStartMs = now
-                coalescedEvent?.recycle()
-                coalescedEvent = MotionEvent.obtain(event)
-
-                mainHandler.postDelayed({
-                    // Window expired - process coalesced event
-                    coalescedEvent?.let { processTouchEventInternal(it) }
-                    coalescedEvent?.recycle()
-                    coalescedEvent = null
-                    isCoalescing = false
-                }, COALESCE_WINDOW_MS)
-
-                return true
-            } else {
-                // Within coalescing window - update coalesced event
-                if (now - coalesceStartMs < COALESCE_WINDOW_MS) {
-                    coalescedEvent?.recycle()
-                    coalescedEvent = MotionEvent.obtain(event)
-                    return true
-                } else {
-                    // Window already expired, process immediately
-                    isCoalescing = false
-                }
-            }
+        // Full lift / cancel: handle immediately and cancel any pending coalesced flush.
+        if (actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_CANCEL) {
+            cancelReleaseCoalesce()
+            touchDriver.ingest(event)
+            handleAllFingersLift(actionMasked)
+            return true
         }
 
-        // Not coalescing, or event type doesn't coalesce - process immediately
-        return processTouchEventInternal(event)
+        // If a new non-UP event arrives while a release burst is pending, flush first.
+        // Prevents stale lift processing after a new touch-down.
+        if (releaseCoalesceActive && actionMasked != MotionEvent.ACTION_POINTER_UP) {
+            flushReleaseCoalesce(force = true)
+        }
+
+        touchDriver.ingest(event)
+
+        if (actionMasked == MotionEvent.ACTION_POINTER_UP) {
+            // Immediate note-offs only: run VoiceLeader allocation update with frozen harmony.
+            // Release per-pointer timbre tracking immediately from THIS snapshot.
+            for (s in 0 until MusicalConstants.MAX_VOICES) {
+                val pid = touchFrame.pointerIds[s]
+                if (pid == TouchFrame.INVALID_ID) continue
+                if ((touchFrame.flags[s] and TouchFrame.F_UP) != 0) {
+                    timbreNav.onPointerUp(pid)
+                }
+            }
+
+            fillActivePointersFromFrame()
+            voiceLeader?.update(harmonicEngine.state, activePointers)
+
+            // Sliding window: extend deadline on each POINTER_UP.
+            releaseCoalesceActive = true
+            releaseCoalesceDeadlineMs = touchFrame.tMs + COALESCE_WINDOW_MS
+            scheduleReleaseCoalesce()
+            return true
+        }
+
+        return processTouchSnapshot()
     }
 
-    private fun processTouchEventInternal(event: MotionEvent): Boolean {
+    private fun scheduleReleaseCoalesce() {
+        if (releaseCoalescePosted) return
+        releaseCoalescePosted = true
+        choreographer.postFrameCallback(releaseCoalesceCallback)
+    }
 
+    private fun cancelReleaseCoalesce() {
+        if (releaseCoalescePosted) {
+            choreographer.removeFrameCallback(releaseCoalesceCallback)
+        }
+        releaseCoalescePosted = false
+        releaseCoalesceActive = false
+        releaseCoalesceDeadlineMs = 0L
+    }
+
+    private fun flushReleaseCoalesce(force: Boolean) {
+        if (!releaseCoalesceActive) return
+        if (!force && SystemClock.uptimeMillis() < releaseCoalesceDeadlineMs) return
+        cancelReleaseCoalesce()
+        processTouchSnapshot()
+    }
+
+    private fun handleAllFingersLift(actionMasked: Int) {
+        if (lastPointerCount > 0) {
+            transitionWindow.arm(
+                touchFrame.tMs,
+                lastActiveCenterX,
+                lastActiveCenterY,
+                harmonicEngine.state,
+                lastPointerCount
+            )
+        }
+
+        for (s in 0 until MusicalConstants.MAX_VOICES) {
+            activePointers[s] = -1
+        }
+
+        if (MusicalConstants.IS_DEBUG) {
+            MidiLogger.logAllNotesOff(
+                if (actionMasked == MotionEvent.ACTION_UP) "ACTION_UP" else "ACTION_CANCEL"
+            )
+        }
+        voiceLeader?.allNotesOff()
+
+        harmonicEngine.onAllFingersLift(touchFrame.tMs)
+        TouchMath.reset()
+        radiusFilter.reset()
+        timbreNav.resetAll()
+        lastPointerCount = 0
+
+        invalidateIfVisualChanged()
+    }
+
+    private fun fillActivePointersFromFrame(): Int {
+        var n = 0
+        for (s in 0 until MusicalConstants.MAX_VOICES) {
+            val pid = touchFrame.pointerIds[s]
+            if (pid == TouchFrame.INVALID_ID) {
+                activePointers[s] = -1
+                continue
+            }
+            // Exclude the pointer that went UP in this snapshot.
+            if ((touchFrame.flags[s] and TouchFrame.F_UP) != 0) {
+                activePointers[s] = -1
+                continue
+            }
+            activePointers[s] = pid
+            n++
+        }
+        return n
+    }
+
+    // SNAPSHOT BOUNDARY: TouchFrame is ingested once per event; harmony + activePointers derive from the same frame.
+    private fun processTouchSnapshot(): Boolean {
         try {
-            TouchLogger.log(event, overlay.width, overlay.height)
-            touchDriver.ingest(event)
-
             val cx = overlay.width / 2f
             val cy = overlay.height / 2f
             TouchMath.update(touchFrame, cx, cy, touchState)
@@ -841,37 +931,7 @@ class MainActivity : AppCompatActivity() {
                     timbreNav.onPointerUp(pid)
                 }
             }
-
-            when (event.actionMasked) {
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (lastPointerCount > 0) {
-                        transitionWindow.arm(
-                            touchFrame.tMs,
-                            lastActiveCenterX,
-                            lastActiveCenterY,
-                            harmonicEngine.state,
-                            lastPointerCount
-                        )
-                    }
-
-                    for (s in 0 until MusicalConstants.MAX_VOICES) {
-                        activePointers[s] = -1
-                    }
-
-                    MidiLogger.logAllNotesOff(
-                        if (event.actionMasked == MotionEvent.ACTION_UP) "ACTION_UP" else "ACTION_CANCEL"
-                    )
-                    voiceLeader?.allNotesOff()
-
-                    harmonicEngine.onAllFingersLift(touchFrame.tMs)
-                    TouchMath.reset()
-                    radiusFilter.reset()
-                    lastPointerCount = 0
-
-                    invalidateIfVisualChanged()
-                    return true
-                }
-            }
+            // ACTION_UP / ACTION_CANCEL are handled in onTouchEvent() before calling this snapshot function.
 
             if (liftToZero) {
                 transitionWindow.arm(
@@ -891,33 +951,26 @@ class MainActivity : AppCompatActivity() {
                 val expansion01 = ((spreadSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
                 touchDriver.expansion01 = expansion01
 
-                for (s in 0 until MusicalConstants.MAX_VOICES) {
-                    val pid = touchFrame.pointerIds[s]
-                    activePointers[s] = pid
-                }
+                // ACTIVE POINTER IDS derived from SAME snapshot as harmony (exclude F_UP).
+                fillActivePointersFromFrame()
 
                 for (s in 0 until MusicalConstants.MAX_VOICES) {
                     val pid = touchFrame.pointerIds[s]
                     if (pid == TouchFrame.INVALID_ID) continue
+                    if ((touchFrame.flags[s] and TouchFrame.F_UP) != 0) continue
 
                     val force = touchFrame.force01[s]
                     val at = (force * 127f).toInt()
                     voiceLeader?.setSlotAftertouch(s, pid, at)
-
-                    val pIndex = event.findPointerIndex(pid)
-                    if (pIndex >= 0) {
-                        val x = event.getX(pIndex)
-                        val y = event.getY(pIndex)
-
-                        if (timbreNav.compute(pid, x, y, gestureContainer)) {
-                            val bend14 = (MusicalConstants.CENTER_PITCH_BEND +
-                                    (gestureContainer.dxNorm * 8191f)).toInt().coerceIn(0, 16383)
-                            voiceLeader?.setSlotPitchBend(s, pid, bend14)
-
-                            val cc74 = (MusicalConstants.CENTER_CC74 +
-                                    (-gestureContainer.dyNorm * 63f)).toInt().coerceIn(0, 127)
-                            voiceLeader?.setSlotCC74(s, pid, cc74)
-                        }
+                    val x = touchFrame.x[s]
+                    val y = touchFrame.y[s]
+                    if (timbreNav.compute(pid, x, y, gestureContainer)) {
+                        val bend14 = (MusicalConstants.CENTER_PITCH_BEND +
+                                (gestureContainer.dxNorm * 8191f)).toInt().coerceIn(0, 16383)
+                        voiceLeader?.setSlotPitchBend(s, pid, bend14)
+                        val cc74 = (MusicalConstants.CENTER_CC74 +
+                                (-gestureContainer.dyNorm * 63f)).toInt().coerceIn(0, 127)
+                        voiceLeader?.setSlotCC74(s, pid, cc74)
                     }
                 }
 
@@ -1033,9 +1086,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        mainHandler.removeCallbacksAndMessages(null)
-        coalescedEvent?.recycle()
-        coalescedEvent = null
+        cancelReleaseCoalesce()
         voiceLeader?.close()
     }
 
