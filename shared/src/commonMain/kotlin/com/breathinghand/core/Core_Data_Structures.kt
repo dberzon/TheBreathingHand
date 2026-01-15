@@ -1,57 +1,83 @@
-package com.breathinghand.core
+/**
+ * Core_Data_Structures.kt
+ *
+ * IMPORTANT — DESIGN CONTRACT (v0.2)
+ *
+ * This file must comply with:
+ *  - BREATHING HAND — GOLDEN RULES
+ *  - Implementation Blueprint v0.2
+ *  - Gesture Grammar Spec v0.2 — Continuous Harmonic Field
+ *
+ * Key invariants:
+ * 1) NO commit / preview / clutch / permission logic.
+ * 2) Harmony is always active once fingers touch.
+ * 3) Stability is achieved via harmonic inertia (hysteresis + dwell), never gates.
+ * 4) Gestures define harmonic meaning only; time is rhythmic coherence only.
+ */
 
 /**
- * Represents the continuously evolving harmonic state of the instrument.
- * Single Source of Truth for: Engine, VoiceLeader, and UI.
+ * Continuously evolving harmonic state of the instrument (v0.2).
+ *
+ * This is NOT a chord preset. It is a layered physical state that morphs over time.
+ *
+ * Notes:
+ * - functionSector is the committed sector (0..11) after inertia.
+ * - rootPc is the derived pitch class (0..11) used for voicing.
+ * - fingerCount is semantic layering input (0..4) for v0.2.
+ * - triad/seventh are latched archetypes from GestureAnalyzer (0 = NONE).
  */
 data class HarmonicState(
-    /**
-     * Root pitch class (0–11).
-     * Follows circle-of-fifths logic (0=C, 7=G, etc).
-     */
+    /** Root pitch class (0..11). */
     var rootPc: Int = 0,
 
-    /**
-     * Current functional sector (0–11) on the circle of fifths.
-     * Used for hysteresis calculation.
-     */
+    /** Committed functional sector (0..11) used for inertia + dwell. */
     var functionSector: Int = 0,
 
-    /**
-     * Continuous harmonic instability factor (0.0..1.0).
-     * Derived from finger spread.
-     * > INSTABILITY_THRESHOLD overrides the chord quality to Diminished.
-     */
+    /** Continuous harmonic instability factor: 0.0 (stable) .. 1.0 (max unstable). */
     var harmonicInstability: Float = 0f,
 
-    /**
-     * Number of active fingers (0..4+).
-     * Defines the number of active layers (roles).
-     */
+    /** Active finger count (0..4 for v0.2 layering). */
     var fingerCount: Int = 0,
 
-    /**
-     * Latched Triad Archetype (e.g. TRIAD_FAN, TRIAD_STRETCH).
-     * Determined by gesture geometry at the moment of 3-finger contact.
-     */
-    var triad: Int = GestureAnalyzerV01.TRIAD_FAN,
+    /** Latched triad archetype (GestureAnalyzerV01.TRIAD_*). 0 == NONE. */
+    var triad: Int = 0,
 
-    /**
-     * Latched Seventh Archetype (e.g. SEVENTH_COMPACT).
-     * Determined by gesture geometry at the moment of 4-finger contact.
-     */
-    var seventh: Int = GestureAnalyzerV01.SEVENTH_COMPACT
+    /** Latched seventh archetype (GestureAnalyzerV01.SEVENTH_*). 0 == NONE. */
+    var seventh: Int = 0
 ) {
     /**
-     * Helper to copy state values without allocation churn.
-     * Essential for the hot path.
+     * Zero-allocation copy used by TransitionWindow / restores.
      */
     fun copyFrom(other: HarmonicState) {
-        this.rootPc = other.rootPc
-        this.functionSector = other.functionSector
-        this.harmonicInstability = other.harmonicInstability
-        this.fingerCount = other.fingerCount
-        this.triad = other.triad
-        this.seventh = other.seventh
+        rootPc = other.rootPc
+        functionSector = other.functionSector
+        harmonicInstability = other.harmonicInstability
+        fingerCount = other.fingerCount
+        triad = other.triad
+        seventh = other.seventh
+    }
+
+    /**
+     * Optional helper (still zero-alloc): reset to baseline.
+     */
+    fun reset() {
+        rootPc = 0
+        functionSector = 0
+        harmonicInstability = 0f
+        fingerCount = 0
+        triad = 0
+        seventh = 0
     }
 }
+
+/**
+ * NOTE ON TEMPORAL CONSTANTS
+ *
+ * Any timing constants (Transition Window, cascades, etc.) must be used ONLY for rhythmic coherence
+ * (note retriggering / release coalescing / landing coalescing).
+ *
+ * They must never:
+ *  - enable harmony change
+ *  - block harmony change
+ *  - gate root/quality selection
+ */
