@@ -4,7 +4,6 @@ project(oboe_synth)
 
 add_library(oboe_synth SHARED
     OboeSynthEngine.cpp
-    Wavetable.cpp
 )
 
 # === FluidSynth (Prefab or prebuilt) configuration ===
