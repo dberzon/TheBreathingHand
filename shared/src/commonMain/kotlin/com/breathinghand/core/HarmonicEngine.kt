@@ -45,12 +45,18 @@ class HarmonicEngine {
         val prevSev = state.seventh
 
         if (!hasTouch) {
-            val biasSector = initialBiasSector(centerYNorm)
-            state.functionSector = biasSector
-            state.rootPc = sectorToPitchClass(biasSector)
-            candidateSector = biasSector
+            // LANDING SEED (critical):
+            // Seed from the first valid angle immediately to avoid a "bias chord" flash
+            // that only corrects after dwell. Vertical bias is gravity, not an audible
+            // wrong sector on attack.
+            val seedSector = quantizeAngleToSector(angleRad)
+            state.functionSector = seedSector
+            state.rootPc = sectorToPitchClass(seedSector)
+            candidateSector = seedSector
             dwellStartMs = nowMs
-            lastAngleTimeMs = 0L
+            // Seed angular velocity integrator so first-frame velocity is 0.
+            lastAngleRad = angleRad
+            lastAngleTimeMs = nowMs
             hasTouch = true
         }
 

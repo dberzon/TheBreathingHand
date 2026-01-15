@@ -9,7 +9,6 @@ object MusicalConstants {
      */
     const val IS_DEBUG = false
 
-
     // Music domain
     const val MIDDLE_C = 60
     const val MAX_NOTE = 96 // C7
@@ -50,6 +49,11 @@ object MusicalConstants {
     // Transition Window (rhythmic-only re-articulation).
     const val TRANSITION_WINDOW_MS: Long = 120L
     const val TRANSITION_TOLERANCE_PX: Float = 40f
+
+    // Cascade windows (rhythmic-only coherence).
+    // Prevent spurious note-ons caused by near-simultaneous finger lift/landing spread across frames.
+    const val RELEASE_CASCADE_MS: Long = 40L
+    const val LANDING_CASCADE_MS: Long = 40L
 
     // Initial-only vertical bias.
     const val BIAS_UPPER_CUTOFF_NORM: Float = 0.33f

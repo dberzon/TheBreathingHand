@@ -56,6 +56,12 @@ class GestureAnalyzerV01(
     // Scratch: active slots (max 5)
     private val activeSlots = IntArray(MusicalConstants.MAX_VOICES)
 
+    private fun isSlotActive(frame: TouchFrame, i: Int): Boolean {
+        val pid = frame.pointerIds[i]
+        if (pid == TouchFrame.INVALID_ID) return false
+        return (frame.flags[i] and TouchFrame.F_UP) == 0
+    }
+
     /**
      * Update archetypes ONLY when a semantic event occurs.
      *
@@ -76,7 +82,7 @@ class GestureAnalyzerV01(
         // Build active slot list (allocation-free)
         var n = 0
         for (i in 0 until MusicalConstants.MAX_VOICES) {
-            if (frame.pointerIds[i] != TouchFrame.INVALID_ID) {
+            if (isSlotActive(frame, i)) {
                 activeSlots[n] = i
                 n++
             }

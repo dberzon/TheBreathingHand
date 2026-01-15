@@ -18,9 +18,12 @@ interface MidiOutput {
 }
 
 /**
- * MPE Implementation: 1-to-1 mapping (Slot 0 -> Ch 1, Slot 1 -> Ch 2, etc.)
- * Note: Your project currently maps Slot 0 -> Ch 2 (Human Ch 2) based on MusicalConstants logic.
- * We preserve your specific logic: channel = slot + 1
+ * MPE Implementation (MIDI channels are 1-based for humans, 0-based in MidiOut API):
+ * - MIDI Ch 1 is GLOBAL/RESERVED (not used for per-finger notes here).
+ * - Member channels start at MIDI Ch 2.
+ * - We therefore send on ch = slot + 1 (0-based), i.e.:
+ *     slot 0 -> ch=1 -> MIDI Ch 2
+ *     slot 1 -> ch=2 -> MIDI Ch 3
  */
 class MpeMidiOutput(private val midi: MidiOut) : MidiOutput {
 

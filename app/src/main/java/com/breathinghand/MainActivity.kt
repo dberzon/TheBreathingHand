@@ -132,6 +132,13 @@ class MainActivity : AppCompatActivity() {
     private val gestureContainer = TimbreNavigator.MutableGesture()
     private var lastPointerCount = 0
 
+    // Release-cascade suppression (rhythmic-only): prevent re-voicing/note-ons during multi-finger lift collapse.
+    private var releaseCascadeUntilMs: Long = 0L
+
+    // Landing/add-finger cascade suppression (rhythmic-only): prevent arpeggiated partial-chord attacks
+    // when multiple fingers land across adjacent frames (0→1→2→3→4). First contact still sounds.
+    private var landingCascadeUntilMs: Long = 0L
+
     // Last non-zero centroid (used to arm Transition Window on lift-to-zero)
     private var lastActiveCenterX = 0f
     private var lastActiveCenterY = 0f
@@ -788,7 +795,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            fillActivePointersFromFrame()
+            val activeNow = fillActivePointersFromFrame()
+
+            // Enter/extend release-cascade window if we still have fingers down after this POINTER_UP.
+            // This prevents "last finger becomes a new 1-finger chord attack" during collapse.
+            if (activeNow > 0) {
+                val dl = touchFrame.tMs + MusicalConstants.RELEASE_CASCADE_MS
+                if (dl > releaseCascadeUntilMs) releaseCascadeUntilMs = dl
+            } else {
+                releaseCascadeUntilMs = 0L
+            }
+
+            val inReleaseCascade = (activeNow > 0 && touchFrame.tMs < releaseCascadeUntilMs)
+            voiceLeader?.setReleaseCascadeActive(inReleaseCascade)
+            voiceLeader?.setLandingCascadeActive(false)
             voiceLeader?.update(harmonicEngine.state, activePointers)
 
             // Sliding window: extend deadline on each POINTER_UP.
@@ -846,6 +866,8 @@ class MainActivity : AppCompatActivity() {
         voiceLeader?.allNotesOff()
 
         harmonicEngine.onAllFingersLift(touchFrame.tMs)
+        releaseCascadeUntilMs = 0L
+        landingCascadeUntilMs = 0L
         TouchMath.reset()
         radiusFilter.reset()
         timbreNav.resetAll()
@@ -889,7 +911,13 @@ class MainActivity : AppCompatActivity() {
 
             val landing = (lastPointerCount == 0 && fCount > 0)
             val addFinger = (fCount > lastPointerCount)
+            val removeFinger = (fCount > 0 && fCount < lastPointerCount)
             val liftToZero = (fCount == 0 && lastPointerCount > 0)
+
+            // Any new landing or addition cancels release-cascade suppression immediately.
+            if (landing || addFinger) {
+                releaseCascadeUntilMs = 0L
+            }
 
             var semanticEvent = when {
                 landing -> GestureAnalyzerV01.EVENT_LANDING
@@ -943,6 +971,23 @@ class MainActivity : AppCompatActivity() {
                 )
                 radiusFilter.reset()
             }
+
+            // If finger count is collapsing (multi-finger lift), suppress re-voicing/note-ons briefly.
+            if (removeFinger) {
+                val dl = touchFrame.tMs + MusicalConstants.RELEASE_CASCADE_MS
+                if (dl > releaseCascadeUntilMs) releaseCascadeUntilMs = dl
+            }
+            if (liftToZero || fCount == 0) releaseCascadeUntilMs = 0L
+
+            // If finger count is increasing (multi-finger landing/add), suppress intermediate re-voicing/note-ons briefly.
+            // First contact still sounds; this only prevents 0→1→2→3→4 partial-chord 'chatter'.
+            if (landing || addFinger) {
+                val dl = touchFrame.tMs + MusicalConstants.LANDING_CASCADE_MS
+                if (dl > landingCascadeUntilMs) landingCascadeUntilMs = dl
+            }
+            // Any removal cancels landing cascade immediately.
+            if (removeFinger) landingCascadeUntilMs = 0L
+            if (liftToZero || fCount == 0) landingCascadeUntilMs = 0L
 
             if (touchState.isActive) {
                 val tSec = (System.nanoTime() - startTime) / 1_000_000_000f
@@ -1007,6 +1052,11 @@ class MainActivity : AppCompatActivity() {
                     MidiLogger.logHarmony(harmonicEngine.state)
                 }
 
+                // Tell VoiceLeader whether we are in rhythmic-only cascade windows.
+                val inReleaseCascade = (fCount > 0 && touchFrame.tMs < releaseCascadeUntilMs)
+                voiceLeader?.setReleaseCascadeActive(inReleaseCascade)
+                val inLandingCascade = (fCount > 0 && touchFrame.tMs < landingCascadeUntilMs)
+                voiceLeader?.setLandingCascadeActive(inLandingCascade)
                 voiceLeader?.update(harmonicEngine.state, activePointers)
                 lastPointerCount = fCount
             } else {
