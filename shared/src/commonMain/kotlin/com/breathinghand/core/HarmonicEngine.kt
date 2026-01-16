@@ -45,6 +45,7 @@ class HarmonicEngine {
         val prevSev = state.seventh
 
         if (!hasTouch) {
+            // Rule 2: Harmony Is Always Alive — Landing produces sound immediately.
             // LANDING SEED (critical):
             // Seed from the first valid angle immediately to avoid a "bias chord" flash
             // that only corrects after dwell. Vertical bias is gravity, not an audible
@@ -60,14 +61,17 @@ class HarmonicEngine {
             hasTouch = true
         }
 
+        // Rule 3: Modification Over Replacement — Adding fingers adds layers, removing removes only those layers.
         val fc = fingerCount.coerceIn(0, 4)
         state.fingerCount = fc
         state.triad = if (fc >= 3) triadArchetype else GestureAnalyzerV01.TRIAD_NONE
         state.seventh = if (fc >= 4) seventhArchetype else GestureAnalyzerV01.SEVENTH_NONE
 
+        // Rule 8: Closed / Collapsed Grip Means Instability — Smaller spread maps to continuous instability (no mode switch).
         state.harmonicInstability = spreadToInstability(spreadPx)
 
         val rawSector = quantizeAngleToSector(angleRad)
+        // Rule 5: Stability Comes From Physics, Not Permission — Hysteresis provides physical resistance, not gating.
         val hysteresisSector = applyAngularHysteresis(state.functionSector, rawSector, angleRad)
 
         if (hysteresisSector != candidateSector) {
@@ -77,10 +81,12 @@ class HarmonicEngine {
 
         val angVel = computeAngularVelocity(nowMs, angleRad)
         val dwellMs = nowMs - dwellStartMs
+        // Rule 5: Stability Comes From Physics, Not Permission — Dwell is debounce/resistance, not a permission gate.
         val shouldAdvance =
             dwellMs >= MusicalConstants.DWELL_THRESHOLD_MS ||
                     abs(angVel) >= MusicalConstants.ANGULAR_SNAP_THRESHOLD_RAD_PER_SEC
 
+        // Rule 4: Continuous Morphing Is Fundamental — Harmony evolves continuously, never gated by permission.
         if (shouldAdvance && candidateSector != state.functionSector) {
             state.functionSector = candidateSector
             state.rootPc = sectorToPitchClass(candidateSector)
@@ -129,6 +135,7 @@ class HarmonicEngine {
         return s
     }
 
+    // Rule 5: Stability Comes From Physics, Not Permission — Hysteresis provides physical resistance via margin, not boolean gates.
     private fun applyAngularHysteresis(currentSector: Int, rawSector: Int, angleRad: Float): Int {
         if (rawSector == currentSector) return rawSector
 
@@ -145,6 +152,7 @@ class HarmonicEngine {
         return (sector * 7) % 12
     }
 
+    // Rule 8: Closed / Collapsed Grip Means Instability — Smaller spread maps to continuous instability (no mode switch).
     private fun spreadToInstability(spreadPx: Float): Float {
         val min = MusicalConstants.SPREAD_MIN_PX
         val max = MusicalConstants.SPREAD_MAX_PX

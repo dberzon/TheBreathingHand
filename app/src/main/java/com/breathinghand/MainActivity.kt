@@ -81,7 +81,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var overlay: HarmonicOverlayView
     private lateinit var externalRoutingSwitch: Switch // External MIDI selector (MPE multi-channel / General MIDI single-channel)
-    private var calibrationView: CalibrationView? = null
+    private lateinit var calibrationView: CalibrationView
 
     // SF2 file picker
     private val pickSf2Launcher = registerForActivityResult(
@@ -108,6 +108,9 @@ class MainActivity : AppCompatActivity() {
     // Last non-zero centroid (used to arm Transition Window on lift-to-zero)
     private var lastActiveCenterX = 0f
     private var lastActiveCenterY = 0f
+
+    // Last spread value (preserved for END marker snapshots)
+    private var lastSpreadSmooth: Float = 0f
 
     // Visual change detection
     private var lastDrawnSector = -1
@@ -404,20 +407,38 @@ class MainActivity : AppCompatActivity() {
         // at the Activity level, we intercept everything not caught by views.
         // The Switch will handle its own touches. We process the rest for music.
 
+        // Rule 13: Performance Is a Musical Requirement — Capture timestamp once per MotionEvent
+        // to ensure all pointers in the same event share the same timestamp (eliminates jitter).
+        val nowNs = SystemClock.elapsedRealtimeNanos()
+
         // TELEMETRY: Raw touch capture (BEFORE touchDriver.ingest() for zero-latency recording)
         // Capture all active pointers on each event to get complete raw signal
         val actionMasked = event.actionMasked
         if (TelemetryRecorder.isRecording()) {
             val pointerCount = event.pointerCount
+            // For ACTION_POINTER_UP/ACTION_POINTER_DOWN, only the pointer at actionIndex has that action;
+            // all other pointers should be recorded as ACTION_MOVE
+            val isPointerAction = actionMasked == MotionEvent.ACTION_POINTER_UP || 
+                                  actionMasked == MotionEvent.ACTION_POINTER_DOWN
+            val actionIndex = if (isPointerAction) event.actionIndex else -1
+            
             for (i in 0 until pointerCount) {
                 val pointerId = event.getPointerId(i)
                 val x = event.getX(i)
                 val y = event.getY(i)
-                // Record with the masked action (ACTION_DOWN, ACTION_MOVE, ACTION_POINTER_UP, etc.)
-                TelemetryRecorder.recordTouch(actionMasked, pointerId, x, y)
+                // Record the pointer at actionIndex with the masked action, others with ACTION_MOVE
+                val recordAction = if (isPointerAction && i == actionIndex) {
+                    actionMasked
+                } else if (isPointerAction) {
+                    MotionEvent.ACTION_MOVE
+                } else {
+                    actionMasked
+                }
+                TelemetryRecorder.recordTouch(nowNs, recordAction, pointerId, x, y)
             }
         }
 
+        // Rule 13: Performance Is a Musical Requirement — Zero allocation hot path confirmed (pre-allocated buffer).
         // SNAPSHOT BOUNDARY:
         // MotionEvent -> AndroidTouchDriver.ingest() happens exactly once,
         // then BOTH HarmonicState and activePointerIds are derived from touchFrame (same snapshot).
@@ -439,6 +460,7 @@ class MainActivity : AppCompatActivity() {
         touchDriver.ingest(event)
 
         if (actionMasked == MotionEvent.ACTION_POINTER_UP) {
+            // Rule 3: Modification Over Replacement — Updates active voices only, never full chord retrigger.
             // Immediate note-offs only: run VoiceLeader allocation update with frozen harmony.
             // Release per-pointer timbre tracking immediately from THIS snapshot.
             for (s in 0 until MusicalConstants.MAX_VOICES) {
@@ -451,6 +473,7 @@ class MainActivity : AppCompatActivity() {
 
             val activeNow = fillActivePointersFromFrame()
 
+            // Rule 6: Temporal Logic Must Never Define Harmony — Release cascade is rhythmic-only, prevents re-voicing chatter.
             // Enter/extend release-cascade window if we still have fingers down after this POINTER_UP.
             // This prevents "last finger becomes a new 1-finger chord attack" during collapse.
             if (activeNow > 0) {
@@ -498,6 +521,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleAllFingersLift(actionMasked: Int) {
+        // Rule 2: Harmony Is Always Alive — Record "End of Gesture" snapshot before resetting state.
+        // This captures the final gesture boundary (lift-to-zero) for complete telemetry coverage.
+        if (TelemetryRecorder.isRecording() && lastPointerCount > 0) {
+            val state = harmonicEngine.state
+            val tNs = SystemClock.elapsedRealtimeNanos()
+            TelemetryRecorder.recordSnapshotEnd(
+                tNs = tNs,
+                fingerCount = 0, // Lift-to-zero: no fingers
+                centroidX = lastActiveCenterX,
+                centroidY = lastActiveCenterY,
+                spread = lastSpreadSmooth, // Preserve last meaningful spread
+                instability = state.harmonicInstability, // Preserve instability
+                triadArchetype = state.triad,
+                seventhArchetype = state.seventh,
+                rootPc = state.rootPc,
+                sector = state.functionSector
+            )
+        }
+
         if (lastPointerCount > 0) {
             transitionWindow.arm(
                 touchFrame.tMs,
@@ -549,6 +591,7 @@ class MainActivity : AppCompatActivity() {
         return n
     }
 
+    // Rule 13: Performance Is a Musical Requirement — Zero allocation hot path confirmed (pre-allocated buffer).
     // SNAPSHOT BOUNDARY: TouchFrame is ingested once per event; harmony + activePointers derive from the same frame.
     private fun processTouchSnapshot(): Boolean {
         try {
@@ -579,6 +622,7 @@ class MainActivity : AppCompatActivity() {
                 else -> GestureAnalyzerV01.EVENT_NONE
             }
 
+            // Rule 7: The Transition Window Is Rhythmic Only — Preserves harmonic state for rhythmic re-articulation, never gates harmony.
             var transitionHit = false
             if (landing) {
                 transitionHit = transitionWindow.consumeIfHit(
@@ -616,6 +660,26 @@ class MainActivity : AppCompatActivity() {
             // ACTION_UP / ACTION_CANCEL are handled in onTouchEvent() before calling this snapshot function.
 
             if (liftToZero) {
+                // Rule 2: Harmony Is Always Alive — Record "End of Gesture" snapshot before resetting state.
+                // This captures the final gesture boundary (lift-to-zero) for complete telemetry coverage.
+                if (TelemetryRecorder.isRecording() && lastPointerCount > 0) {
+                    val state = harmonicEngine.state
+                    val tNs = SystemClock.elapsedRealtimeNanos()
+                    TelemetryRecorder.recordSnapshotEnd(
+                        tNs = tNs,
+                        fingerCount = 0, // Lift-to-zero: no fingers
+                        centroidX = lastActiveCenterX,
+                        centroidY = lastActiveCenterY,
+                        spread = lastSpreadSmooth, // Preserve last meaningful spread
+                        instability = state.harmonicInstability, // Preserve instability
+                        triadArchetype = state.triad,
+                        seventhArchetype = state.seventh,
+                        rootPc = state.rootPc,
+                        sector = state.functionSector
+                    )
+                }
+
+                // Rule 7: The Transition Window Is Rhythmic Only — Arms for rhythmic re-articulation, never for harmonic gating.
                 transitionWindow.arm(
                     touchFrame.tMs,
                     lastActiveCenterX,
@@ -626,6 +690,7 @@ class MainActivity : AppCompatActivity() {
                 radiusFilter.reset()
             }
 
+            // Rule 6: Temporal Logic Must Never Define Harmony — Release cascade is rhythmic-only, prevents re-voicing chatter.
             // If finger count is collapsing (multi-finger lift), suppress re-voicing/note-ons briefly.
             if (removeFinger) {
                 val dl = touchFrame.tMs + MusicalConstants.RELEASE_CASCADE_MS
@@ -633,6 +698,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (liftToZero || fCount == 0) releaseCascadeUntilMs = 0L
 
+            // Rule 6: Temporal Logic Must Never Define Harmony — Landing cascade is rhythmic-only, prevents partial-chord chatter.
             // If finger count is increasing (multi-finger landing/add), suppress intermediate re-voicing/note-ons briefly.
             // First contact still sounds; this only prevents 0→1→2→3→4 partial-chord 'chatter'.
             if (landing || addFinger) {
@@ -646,6 +712,7 @@ class MainActivity : AppCompatActivity() {
             if (touchState.isActive) {
                 val tSec = (System.nanoTime() - startTime) / 1_000_000_000f
                 val spreadSmooth = radiusFilter.filter(touchState.radius, tSec)
+                lastSpreadSmooth = spreadSmooth // Cache for END marker
 
                 val expansion01 = ((spreadSmooth - r1Px) / (r2Px - r1Px)).coerceIn(0f, 1f)
                 touchDriver.expansion01 = expansion01
@@ -688,6 +755,7 @@ class MainActivity : AppCompatActivity() {
                 val centerYNorm =
                     if (overlay.height > 0) (touchState.centerY / overlay.height.toFloat()) else 0.5f
 
+                // Rule 4: Continuous Morphing Is Fundamental — Harmony evolves continuously during play.
                 val changed = if (!transitionHit) {
                     harmonicEngine.update(
                         touchFrame.tMs,
@@ -710,7 +778,10 @@ class MainActivity : AppCompatActivity() {
                 // Captures what the instrument *believes* is happening (derived features)
                 if (TelemetryRecorder.isRecording() && touchState.isActive) {
                     val state = harmonicEngine.state
+                    // Use SystemClock.elapsedRealtimeNanos() for consistent timestamp domain
+                    val snapTNs = SystemClock.elapsedRealtimeNanos()
                     TelemetryRecorder.recordSnapshot(
+                        tNs = snapTNs,
                         fingerCount = fCount,
                         centroidX = touchState.centerX,
                         centroidY = touchState.centerY,
@@ -723,11 +794,13 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
 
+                // Rule 6: Temporal Logic Must Never Define Harmony — Cascade windows are rhythmic-only, never gate harmonic change.
                 // Tell VoiceLeader whether we are in rhythmic-only cascade windows.
                 val inReleaseCascade = (fCount > 0 && touchFrame.tMs < releaseCascadeUntilMs)
                 voiceLeader?.setReleaseCascadeActive(inReleaseCascade)
                 val inLandingCascade = (fCount > 0 && touchFrame.tMs < landingCascadeUntilMs)
                 voiceLeader?.setLandingCascadeActive(inLandingCascade)
+                // Rule 3: Modification Over Replacement — Updates active voices only, never full chord retrigger.
                 voiceLeader?.update(harmonicEngine.state, activePointers)
                 lastPointerCount = fCount
             } else {
@@ -737,7 +810,7 @@ class MainActivity : AppCompatActivity() {
             invalidateIfVisualChanged()
 
             // Update calibration view feedback
-            calibrationView?.updateFeedback()
+            calibrationView.updateFeedback()
         } catch (e: Exception) {
             e.printStackTrace()
         }

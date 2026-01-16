@@ -4,8 +4,13 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.util.AttributeSet
-import android.widget.*
+import android.widget.ArrayAdapter
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.Spinner
+import android.widget.Switch
+import android.widget.TextView
+import android.widget.Toast
 import kotlinx.coroutines.*
 import java.io.File
 
@@ -14,8 +19,7 @@ import java.io.File
  *
  * Provides:
  * - Label selection (FAN, STRETCH, CLUSTER)
- * - Record toggle
- * - Save/Export button
+ * - Record toggle (Auto-exports on Stop)
  * - Real-time feedback (fingerCount, archetype)
  */
 class CalibrationView @JvmOverloads constructor(
@@ -28,12 +32,10 @@ class CalibrationView @JvmOverloads constructor(
 
     private lateinit var labelSpinner: Spinner
     private lateinit var recordToggle: Switch
-    private lateinit var exportButton: Button
     private lateinit var statusText: TextView
     private lateinit var feedbackText: TextView
 
     private var currentTakeId = 1
-    private var exportJob: Job? = null
     private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     init {
@@ -76,7 +78,7 @@ class CalibrationView @JvmOverloads constructor(
             adapter = ArrayAdapter(
                 context,
                 android.R.layout.simple_spinner_item,
-                arrayOf("FAN", "STRETCH", "CLUSTER")
+                arrayOf("FAN", "STRETCH", "CLUSTER", "1-FINGER", "2-FINGER")
             ).apply {
                 setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
             }
@@ -99,20 +101,12 @@ class CalibrationView @JvmOverloads constructor(
             }
         }
 
-        // Export Button
-        exportButton = Button(context).apply {
-            text = "Export"
-            isEnabled = false
-            setOnClickListener {
-                onExportClicked()
-            }
-        }
-
         // Status Text
         statusText = TextView(context).apply {
-            text = "Status: Stopped"
+            text = "Status: Ready (Take 1)"
             setTextColor(Color.WHITE)
             textSize = 12f
+            setPadding(0, 8, 0, 0)
         }
 
         // Feedback Text (real-time)
@@ -121,11 +115,11 @@ class CalibrationView @JvmOverloads constructor(
             setTextColor(Color.YELLOW)
             textSize = 14f
             typeface = Typeface.MONOSPACE
+            setPadding(0, 8, 0, 0)
         }
 
         container.addView(labelLayout)
         container.addView(recordToggle)
-        container.addView(exportButton)
         container.addView(statusText)
         container.addView(feedbackText)
 
@@ -134,52 +128,40 @@ class CalibrationView @JvmOverloads constructor(
 
     private fun onRecordToggleChanged(isChecked: Boolean) {
         if (isChecked) {
+            // START RECORDING
             val label = labelSpinner.selectedItem as String
             TelemetryRecorder.startRecording(label, currentTakeId)
-            statusText.text = "Status: Recording (Take $currentTakeId)"
-            exportButton.isEnabled = false
+            
+            statusText.text = "Recording Take $currentTakeId..."
+            statusText.setTextColor(Color.RED)
+            labelSpinner.isEnabled = false // Lock label while recording
         } else {
-            TelemetryRecorder.stopRecording(getOutputDir())
-            statusText.text = "Status: Stopped (Take $currentTakeId)"
-            exportButton.isEnabled = true
-            currentTakeId++
-        }
-    }
+            // STOP AND AUTO-EXPORT
+            labelSpinner.isEnabled = true
+            statusText.text = "Saving Take $currentTakeId..."
+            statusText.setTextColor(Color.WHITE)
 
-    private fun onExportClicked() {
-        if (exportJob?.isActive == true) return
+            // Launch export job immediately
+            mainScope.launch {
+                // Returns the File object if successful
+                val deferred = TelemetryRecorder.stopRecording(getOutputDir())
+                val file = deferred.await()
 
-        exportJob = mainScope.launch {
-            statusText.text = "Status: Exporting..."
-            exportButton.isEnabled = false
-
-            val deferred = TelemetryRecorder.stopRecording(getOutputDir())
-            val file = deferred.await()
-
-            withContext(Dispatchers.Main) {
+                // Update UI on completion
                 if (file != null) {
-                    statusText.text = "Status: Exported to ${file.name}"
-                    android.widget.Toast.makeText(
-                        context,
-                        "Exported to ${file.absolutePath}",
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
+                    statusText.text = "Saved: ${file.name}"
+                    Toast.makeText(context, "Telemetry Saved", Toast.LENGTH_SHORT).show()
+                    currentTakeId++
                 } else {
-                    statusText.text = "Status: Export failed"
-                    android.widget.Toast.makeText(
-                        context,
-                        "Export failed",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
+                    statusText.text = "Export Failed (Empty?)"
+                    statusText.setTextColor(Color.MAGENTA)
                 }
-                exportButton.isEnabled = true
             }
         }
     }
 
     /**
      * Update real-time feedback (call from main loop).
-     * This is allocation-free (just string building, but we accept it for UI feedback).
      */
     fun updateFeedback() {
         val engine = harmonicEngine ?: return
@@ -204,25 +186,27 @@ class CalibrationView @JvmOverloads constructor(
             else -> "NONE"
         }
 
-        val (touchDropped, snapDropped) = if (TelemetryRecorder.isRecording()) {
-            TelemetryRecorder.getDropCounts()
-        } else {
-            Pair(0, 0)
-        }
-
+        // Only query atomic counters if we are actually recording to save overhead
         val (touchLevel, snapLevel) = if (TelemetryRecorder.isRecording()) {
             TelemetryRecorder.getBufferLevels()
         } else {
             Pair(0, 0)
         }
-
+        
+        // Show drops only if they exist
+        val (touchDropped, snapDropped) = if (TelemetryRecorder.isRecording()) {
+            TelemetryRecorder.getDropCounts()
+        } else {
+            Pair(0, 0)
+        }
+        
         val dropInfo = if (touchDropped > 0 || snapDropped > 0) {
-            " | Drops: T=$touchDropped S=$snapDropped"
+            " | DROPS! T=$touchDropped S=$snapDropped"
         } else {
             ""
         }
 
-        feedbackText.text = "Fingers: $fingerCount | Archetype: $archetypeStr | Buffers: T=$touchLevel S=$snapLevel$dropInfo"
+        feedbackText.text = "Fingers: $fingerCount | $archetypeStr | Buf: $touchLevel/$snapLevel$dropInfo"
     }
 
     private fun getOutputDir(): File {
@@ -231,7 +215,6 @@ class CalibrationView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        exportJob?.cancel()
         mainScope.cancel()
     }
 }
