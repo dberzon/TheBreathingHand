@@ -82,46 +82,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlay: HarmonicOverlayView
     private lateinit var externalRoutingSwitch: Switch // External MIDI selector (MPE multi-channel / General MIDI single-channel)
 
-    // Activity result launcher for picking a single audio file (WAV) — simple custom wavetable
-    private val pickWavLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { loadWavetableUri(it) }
-    }
-
-    // Activity result launcher for mapped samples (asks for mapping metadata)
-    private val pickMappedSampleLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { showMappedSampleDialog(it) }
-    }
-
-    // SFZ file picker
-    private val pickSfzLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { onSfzPicked(it) }
-    }
-
     // SF2 file picker
     private val pickSf2Launcher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { onSf2Picked(it) }
-    }
-
-    // Pick a folder that contains sample files (OpenDocumentTree)
-    private val pickSfzFolderLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let { onSfzFolderPicked(it) }
-    }
-
-    // Pick individual missing sample file
-    private val pickSingleSampleLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { onSingleSamplePicked(it) }
     }
 
     private val activePointers = IntArray(MusicalConstants.MAX_VOICES) { -1 }
@@ -169,6 +134,25 @@ class MainActivity : AppCompatActivity() {
         )
 
         internalSynth = OboeSynthesizer()
+
+        // --- FluidSynth default SF2 auto-load (off the audio thread) ---
+        // Asset: app/src/main/assets/sf2/default.sf2
+        // Copy:  filesDir/sf2/default.sf2
+        importScope.launch {
+            val ok = internalSynth.initFluidSynthAndLoadBundledDefaultSf2(this@MainActivity)
+            runOnUiThread {
+                if (ok) {
+                    Toast.makeText(this@MainActivity, "Loaded bundled SoundFont (default.sf2)", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Bundled SoundFont load failed (check assets/sf2/default.sf2 and FluidSynth build)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+
         midiFanOut = FanOutMidiSink(MonoChannelMidiSink(OboeMidiSink(internalSynth)))
         activeMidiOut = MidiOut(midiFanOut, AndroidMonotonicClock, AndroidForensicLogger)
 
@@ -208,7 +192,7 @@ class MainActivity : AppCompatActivity() {
         externalRoutingSwitch = Switch(this)
         externalRoutingSwitch.textSize = 14f
         externalRoutingSwitch.setTextColor(-1) // White text
-        externalRoutingSwitch.isChecked = true // Default to External MPE (multi-channel)
+        externalRoutingSwitch.isChecked = false // Default to General MIDI (single-channel)
         externalRoutingSwitch.text = if (externalRoutingSwitch.isChecked) getString(R.string.external_midi_label_mpe) else getString(R.string.external_midi_label_gm)
 
         // Position: Top Right
@@ -227,13 +211,6 @@ class MainActivity : AppCompatActivity() {
             // Update switch label to reflect current external routing
             externalRoutingSwitch.text = "External MIDI: $routingName"
             Toast.makeText(this, "External MIDI: $routingName", Toast.LENGTH_SHORT).show()
-        }
-
-        // Long-press the switch to pick a custom wavetable (.wav). Uses a DirectByteBuffer and hands it to native code.
-        externalRoutingSwitch.setOnLongClickListener {
-            pickWavLauncher.launch(arrayOf("audio/wav", "audio/*"))
-            Toast.makeText(this, "Pick a .wav to load as wavetable", Toast.LENGTH_SHORT).show()
-            true
         }
 
         container.addView(externalRoutingSwitch)
@@ -258,8 +235,8 @@ class MainActivity : AppCompatActivity() {
 
         fluidsynthSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
-                // Launch SF2 picker (user picks a soundfont)
-                pickSf2Launcher.launch(arrayOf("*/*"))
+                // Turn on: load bundled default SF2 (user can still pick another SF2 via picker if desired)
+                importScope.launch { internalSynth.initFluidSynthAndLoadBundledDefaultSf2(this@MainActivity) }
             } else {
                 // Turn off: shutdown synth
                 importScope.launch {
@@ -272,66 +249,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Optional: long-press to pick a custom SF2 (keeps the old workflow available)
+        fluidsynthSwitch.setOnLongClickListener {
+            pickSf2Launcher.launch(arrayOf("*/*"))
+            Toast.makeText(this, "Pick a SoundFont (.sf2)", Toast.LENGTH_SHORT).show()
+            true
+        }
+
         container.addView(fluidsynthSwitch)
-
-        // Controls overlay (floating)
-        val controlsOverlay = ControlsOverlayView(this, internalSynth)
-        val controlsParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
-        )
-        controlsParams.gravity = Gravity.BOTTOM or Gravity.END
-        controlsParams.setMargins(48, 48, 48, 48)
-        controlsOverlay.layoutParams = controlsParams
-        container.addView(controlsOverlay)
-
-        // Mapped sample picker (from controls overlay)
-        controlsOverlay.onLoadMappedSample = {
-            pickMappedSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
-        }
-
-        // SFZ importer (from controls overlay)
-        controlsOverlay.onImportSfz = {
-            pickSfzLauncher.launch(arrayOf("*/*"))
-        }
-
-        // Manage samples (from controls overlay)
-        controlsOverlay.onManageSamples = {
-            showManageSamplesDialog()
-        }
 
         // Set the container as the activity content
         setContentView(container)
     }
-
-    private fun showManageSamplesDialog() {
-        val names = internalSynth.getLoadedSampleNames()
-        if (names.isEmpty()) {
-            Toast.makeText(this, "No samples loaded", Toast.LENGTH_SHORT).show()
-            return
-        }
-        var selectedIndex = 0
-        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
-        builder.setTitle("Loaded Samples")
-        builder.setSingleChoiceItems(names, selectedIndex) { _, which ->
-            selectedIndex = which
-        }
-        builder.setPositiveButton("Unload") { _, _ ->
-            val name = names.getOrNull(selectedIndex) ?: return@setPositiveButton
-            androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle("Unload Sample")
-                .setMessage("Unload '$name'? This will remove its mappings.")
-                .setPositiveButton("Yes") { _, _ ->
-                    internalSynth.unloadSample(selectedIndex)
-                    Toast.makeText(this, "Unloaded $name", Toast.LENGTH_SHORT).show()
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-        }
-        builder.setNegativeButton("Close", null)
-        builder.show()
-    }
-
 
     /**
      * Swaps the VoiceLeader routing strategy without breaking the USB connection.
@@ -371,147 +300,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Read content from the URI into a DirectByteBuffer and pass it to the native engine
-    private fun loadWavetableUri(uri: android.net.Uri) {
-        try {
-            contentResolver.openInputStream(uri)?.use { input ->
-                val bytes = input.readBytes()
-                val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                bb.put(bytes)
-                bb.rewind()
-
-                // Hand the DirectByteBuffer to the native side via the OboeSynthesizer wrapper
-                internalSynth.loadWavetableFromByteBuffer(bb)
-                Toast.makeText(this, "Loaded wavetable (${bytes.size} bytes)", Toast.LENGTH_SHORT).show()
-            }
-        } catch (e: java.io.IOException) {
-            Toast.makeText(this, "Failed to load wavetable: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-        }
-    }
-
     private val importScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
 
     // Temporary cache path for loaded soundfonts
     private fun cachedSf2File(): java.io.File {
         return java.io.File(cacheDir, "loaded_soundfont.sf2")
-    }
-
-    private fun showMappedSampleDialog(uri: android.net.Uri) {
-        // Dialog to ask for root, lo, hi (simple numeric inputs)
-        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
-        builder.setTitle("Sample Mapping")
-        val layout = android.widget.LinearLayout(this)
-        layout.orientation = android.widget.LinearLayout.VERTICAL
-        val rootInput = android.widget.EditText(this)
-        rootInput.hint = "Root MIDI note (0..127)"
-        rootInput.setText("60")
-        val loInput = android.widget.EditText(this)
-        loInput.hint = "Low key (0..127)"
-        loInput.setText("0")
-        val hiInput = android.widget.EditText(this)
-        hiInput.hint = "High key (0..127)"
-        hiInput.setText("127")
-        layout.setPadding(24, 12, 24, 12)
-        layout.addView(rootInput)
-        layout.addView(loInput)
-        layout.addView(hiInput)
-        builder.setView(layout)
-        builder.setPositiveButton("Register") { _, _ ->
-            val root = rootInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 60
-            val lo = loInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 0
-            val hi = hiInput.text.toString().toIntOrNull()?.coerceIn(0, 127) ?: 127
-
-            // Run decode/register on IO scope so we don't block main thread
-            importScope.launch {
-                try {
-                    val mime = contentResolver.getType(uri) ?: ""
-                    val wavBytes: ByteArray? = if (mime.contains("wav") || uri.path?.endsWith(".wav", ignoreCase = true) == true) {
-                        // Read raw wav bytes directly
-                        contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    } else {
-                        // Attempt to decode compressed audio to WAV
-                        runOnUiThread { Toast.makeText(this@MainActivity, "Decoding sample...", Toast.LENGTH_SHORT).show() }
-                        com.breathinghand.audio.AudioDecoder.decodeToWavBytes(this@MainActivity, uri)
-                    }
-
-                    if (wavBytes == null) {
-                        runOnUiThread { Toast.makeText(this@MainActivity, "Failed to decode sample (unsupported format)", Toast.LENGTH_LONG).show() }
-                        return@launch
-                    }
-
-                    val bb = java.nio.ByteBuffer.allocateDirect(wavBytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                    bb.put(wavBytes)
-                    bb.rewind()
-
-                    val before = internalSynth.getLoadedSampleNames().toSet()
-                    internalSynth.registerSampleFromByteBuffer(bb, root, lo, hi)
-                    val after = internalSynth.getLoadedSampleNames().toSet()
-                    val added = after - before
-                    if (added.isNotEmpty()) {
-                        runOnUiThread { Toast.makeText(this@MainActivity, "Registered sample (root=$root lo=$lo hi=$hi)", Toast.LENGTH_SHORT).show() }
-                    } else {
-                        runOnUiThread { Toast.makeText(this@MainActivity, "Registration attempted but no sample was added (check logs)", Toast.LENGTH_LONG).show() }
-                    }
-
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    runOnUiThread { Toast.makeText(this@MainActivity, "Failed to register sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show() }
-                }
-            }
-        }
-        builder.setNegativeButton("Cancel", null)
-        builder.show()
-    }
-
-    // --- SFZ Importer helpers ---
-    data class ParsedRegion(val sampleName: String, val root: Int, val lo: Int, val hi: Int)
-
-    private var pendingSfzRegions: List<ParsedRegion>? = null
-    private var pendingSfzMissing: MutableList<String> = mutableListOf()
-    private var pendingSfzMissingIndex = 0
-
-    private fun onSfzPicked(uri: android.net.Uri) {
-        // Parse SFZ file for regions; then ask user to pick a folder containing samples
-        try {
-            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-            val regions = mutableListOf<ParsedRegion>()
-            text.lines().forEach { raw ->
-                val line = raw.trim()
-                if (line.isEmpty()) return@forEach
-                if (!line.contains("sample=")) return@forEach
-                // Tokenize by whitespace
-                val tokens = line.split(Regex("\\s+"))
-                var sampleName: String? = null
-                var lokey: Int? = null
-                var hikey: Int? = null
-                var root: Int? = null
-                for (t in tokens) {
-                    if (t.startsWith("sample=")) sampleName = t.substringAfter("=")
-                    if (t.startsWith("lokey=")) lokey = parseSfzKey(t.substringAfter("="))
-                    if (t.startsWith("hikey=")) hikey = parseSfzKey(t.substringAfter("="))
-                    if (t.startsWith("pitch_keycenter=") || t.startsWith("key=") || t.startsWith("pitch_keycenter")) {
-                        val v = t.substringAfter("=")
-                        root = parseSfzKey(v)
-                    }
-                }
-                if (sampleName != null) {
-                    val lo = lokey ?: 0
-                    val hi = hikey ?: 127
-                    val r = root ?: ((lo + hi) / 2)
-                    regions.add(ParsedRegion(sampleName, r, lo, hi))
-                }
-            }
-            if (regions.isEmpty()) {
-                Toast.makeText(this, "No regions found in SFZ", Toast.LENGTH_LONG).show()
-                return
-            }
-            pendingSfzRegions = regions
-            // Ask user to pick the folder containing samples
-            Toast.makeText(this, "Select the folder that contains SFZ sample files", Toast.LENGTH_SHORT).show()
-            pickSfzFolderLauncher.launch(null)
-        } catch (e: java.io.IOException) {
-            Toast.makeText(this, "Failed to read SFZ: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-        }
     }
 
     private fun onSf2Picked(uri: android.net.Uri) {
@@ -588,172 +381,6 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 android.util.Log.e("BreathingHand", "runSelfTest: exception ${'$'}e")
             }
-        }
-    }
-
-    private fun parseSfzKey(s: String): Int? {
-        // Accept integers or note names like c4 or c-1
-        val asInt = s.toIntOrNull()
-        if (asInt != null) return asInt
-        // Parse note name
-        val m = Regex("^([A-Ga-g])([#b]?)(-?\\d+)").find(s)
-        if (m != null) {
-            val note = m.groupValues[1].uppercase()
-            val acc = m.groupValues[2]
-            val oct = m.groupValues[3].toIntOrNull() ?: return null
-            val base = when (note) {
-                "C" -> 0
-                "D" -> 2
-                "E" -> 4
-                "F" -> 5
-                "G" -> 7
-                "A" -> 9
-                "B" -> 11
-                else -> 0
-            }
-            var sem = base
-            if (acc == "#") sem += 1
-            if (acc == "b") sem -= 1
-            val midi = (oct + 1) * 12 + sem
-            return midi.coerceIn(0, 127)
-        }
-        return null
-    }
-
-    private fun onSfzFolderPicked(treeUri: android.net.Uri) {
-        fun getDisplayNameFromDoc(doc: androidx.documentfile.provider.DocumentFile?): String? {
-            if (doc == null) return null
-            return doc.name
-        }
-        val regions = pendingSfzRegions ?: return
-        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, treeUri)
-        val missing = mutableListOf<String>()
-        val before = internalSynth.getLoadedSampleNames().toSet()
-        val decodeJobs = mutableListOf<kotlinx.coroutines.Deferred<Pair<Boolean,String?>>>()
-        for (r in regions) {
-            val name = r.sampleName
-            var doc = tree?.findFile(name)
-            if (doc == null) {
-                // try basename (in case path included)
-                val base = name.substringAfterLast('/')
-                doc = tree?.findFile(base)
-            }
-            if (doc == null) {
-                missing.add(name)
-            } else {
-                // Launch async decode+register per-file
-                val job = importScope.async {
-                    try {
-                        val mime = contentResolver.getType(doc.uri) ?: ""
-                        val wavBytes = if (mime.contains("wav") || (doc.name?.endsWith(".wav", true) == true)) {
-                            contentResolver.openInputStream(doc.uri)?.use { it.readBytes() }
-                        } else {
-                            com.breathinghand.audio.AudioDecoder.decodeToWavBytes(this@MainActivity, doc.uri)
-                        }
-
-                        if (wavBytes == null) {
-                            return@async Pair(false, name)
-                        }
-
-                        val bb = java.nio.ByteBuffer.allocateDirect(wavBytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                        bb.put(wavBytes)
-                        bb.rewind()
-                        val display = getDisplayNameFromDoc(doc) ?: r.sampleName.substringAfterLast('/')
-                        internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, display)
-                        return@async Pair(true, display)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        return@async Pair(false, name)
-                    }
-                }
-                decodeJobs.add(job)
-            }
-        }
-
-        // Launch a background job to await decodes and report results when done
-        importScope.launch {
-            val results = decodeJobs.map { it.await() }
-            val successNames = results.filter { it.first }.mapNotNull { it.second }
-            val failedNames = results.filter { !it.first }.mapNotNull { it.second }
-
-            runOnUiThread {
-                if (failedNames.isNotEmpty()) {
-                    Toast.makeText(this@MainActivity, "${failedNames.size} files failed to import", Toast.LENGTH_LONG).show()
-                }
-                if (successNames.isNotEmpty()) {
-                    Toast.makeText(this@MainActivity, "Imported ${successNames.size} regions from SFZ", Toast.LENGTH_SHORT).show()
-                    pendingSfzRegions = null
-                }
-            }
-        }
-        // Immediately return; background job will update UI when finished
-        Toast.makeText(this, "Importing ${regions.size - missing.size} files...", Toast.LENGTH_SHORT).show()
-        return
-        val after = internalSynth.getLoadedSampleNames().toSet()
-        val added = after - before
-        if (missing.isEmpty() && added.isNotEmpty()) {
-            Toast.makeText(this, "Imported ${regions.size} regions from SFZ", Toast.LENGTH_SHORT).show()
-            pendingSfzRegions = null
-            return
-        }
-        if (missing.isEmpty() && added.isEmpty()) {
-            Toast.makeText(this, "Attempted import but no samples were registered (check logs)", Toast.LENGTH_LONG).show()
-            return
-        }
-        // Need user help to pick missing files
-        pendingSfzMissing = missing.toMutableList()
-        pendingSfzMissingIndex = 0
-        Toast.makeText(this, "${missing.size} files missing; please select them when prompted", Toast.LENGTH_LONG).show()
-        // Launch picker for first missing
-        pickSingleSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
-    }
-
-    private fun onSingleSamplePicked(uri: android.net.Uri) {
-        // Ensure helper for display name exists
-        fun getDisplayNameLocal(u: android.net.Uri): String? {
-            var name: String? = null
-            val cursor = contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) name = it.getString(idx)
-                }
-            }
-            return name
-        }
-        if (pendingSfzMissingIndex >= pendingSfzMissing.size) return
-        val expectedName = pendingSfzMissing[pendingSfzMissingIndex]
-        try {
-            contentResolver.openInputStream(uri)?.use { input ->
-                val bytes = input.readBytes()
-                val bb = java.nio.ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                bb.put(bytes)
-                bb.rewind()
-                // Find regions referencing expectedName and register; fall back to base name
-                val regions = pendingSfzRegions ?: listOf()
-                val base = expectedName.substringAfterLast('/')
-                val name = getDisplayNameLocal(uri) ?: base
-                val before = internalSynth.getLoadedSampleNames().toSet()
-                regions.filter { it.sampleName == expectedName || it.sampleName == base }.forEach { r ->
-                    internalSynth.registerSampleFromByteBuffer(bb, r.root, r.lo, r.hi, name)
-                }
-                val after = internalSynth.getLoadedSampleNames().toSet()
-                val added = after - before
-                if (added.isEmpty()) {
-                    Toast.makeText(this, "Selected file registered but no samples were added (check logs)", Toast.LENGTH_LONG).show()
-                }
-            }
-        } catch (e: java.io.IOException) {
-            Toast.makeText(this, "Failed to read selected sample: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-        }
-        pendingSfzMissingIndex += 1
-        if (pendingSfzMissingIndex < pendingSfzMissing.size) {
-            pickSingleSampleLauncher.launch(arrayOf("audio/wav", "audio/*"))
-        } else {
-            Toast.makeText(this, "Completed mapping missing files", Toast.LENGTH_SHORT).show()
-            pendingSfzRegions = null
-            pendingSfzMissing.clear()
-            pendingSfzMissingIndex = 0
         }
     }
 
@@ -1104,6 +731,14 @@ class MainActivity : AppCompatActivity() {
                             externalMidiSink?.close()
                             externalMidiSink = AndroidMidiSink(port)
                             midiFanOut.setSecondary(externalMidiSink)
+
+                            // Quick validation: play a short test note on channel 1 (Middle C)
+                            try {
+                                activeMidiOut?.sendNoteOn(0, 60, 100)
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    activeMidiOut?.sendNoteOff(0, 60)
+                                }, 300)
+                            } catch (_: Exception) { /* ignore test failures */ }
 
                             runOnUiThread { Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show() }
                         } else {

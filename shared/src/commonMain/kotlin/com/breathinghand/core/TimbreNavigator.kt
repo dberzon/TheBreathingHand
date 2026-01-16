@@ -61,8 +61,10 @@ class TimbreNavigator(
         var dy = y - oy
 
         // Circular deadzone (instead of square) for consistent feel in all directions
-        val rawDist = sqrt(dx * dx + dy * dy)
-        if (rawDist < deadzonePx) {
+        // Optimized: use squared distance comparison to avoid sqrt (musical latency optimization)
+        val deadzoneSq = deadzonePx * deadzonePx
+        val distSq = dx * dx + dy * dy
+        if (distSq < deadzoneSq) {
             dx = 0f
             dy = 0f
         }

@@ -1,5 +1,10 @@
 package com.breathinghand.audio
 
+import android.content.Context
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+
 class OboeSynthesizer {
     private var nativeHandle: Long = 0L
 
@@ -50,35 +55,54 @@ class OboeSynthesizer {
         }
     }
 
-    fun setFilterCutoff(channel: Int, cutoffHz: Float) {
-        if (nativeHandle != 0L) {
-            nativeSetFilterCutoff(nativeHandle, channel, cutoffHz)
+    /**
+     * Ensure the bundled default SF2 exists as a real filesystem path (required by FluidSynth).
+     *
+     * Copies from assets: "sf2/default.sf2" -> filesDir/sf2/default.sf2
+     *
+     * This MUST be called off the audio thread.
+     */
+    fun ensureBundledDefaultSf2(context: Context): String? {
+        val assetPath = "sf2/default.sf2"
+        val outDir = File(context.filesDir, "sf2")
+        if (!outDir.exists() && !outDir.mkdirs()) return null
+
+        val outFile = File(outDir, "default.sf2")
+        if (outFile.exists() && outFile.length() > 0L) {
+            return outFile.absolutePath
         }
+
+        // Copy asset to internal storage (filesystem path).
+        try {
+            context.assets.open(assetPath).use { input ->
+                FileOutputStream(outFile).use { output ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        output.write(buf, 0, n)
+                    }
+                    output.flush()
+                }
+            }
+        } catch (e: IOException) {
+            // If copy fails, delete partial file so next run can retry cleanly.
+            try { outFile.delete() } catch (_: Throwable) {}
+            return null
+        }
+
+        return if (outFile.exists() && outFile.length() > 0L) outFile.absolutePath else null
     }
 
-    fun setEnvelope(channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float) {
-        if (nativeHandle != 0L) {
-            nativeSetEnvelope(nativeHandle, channel, attackMs, decayMs, sustainLevel, releaseMs)
-        }
-    }
-
-    fun setWaveform(index: Int) {
-        if (nativeHandle != 0L) {
-            nativeSetWaveform(nativeHandle, index)
-        }
-    }
-
-    // Load user-supplied wavetable data from a DirectByteBuffer and pass to native layer
-    fun loadWavetableFromByteBuffer(buffer: java.nio.ByteBuffer) {
-        if (nativeHandle != 0L) {
-            nativeLoadWavetableFromDirectBuffer(nativeHandle, buffer, buffer.capacity().toLong())
-        }
-    }
-
-    fun registerSampleFromByteBuffer(buffer: java.nio.ByteBuffer, rootNote: Int, loKey: Int, hiKey: Int, name: String? = null) {
-        if (nativeHandle != 0L) {
-            nativeRegisterSample(nativeHandle, buffer, buffer.capacity().toLong(), rootNote, loKey, hiKey, name)
-        }
+    /**
+     * One-call setup: init FluidSynth + load bundled default SF2.
+     * MUST be called off the audio thread.
+     */
+    fun initFluidSynthAndLoadBundledDefaultSf2(context: Context): Boolean {
+        if (!isFluidSynthCompiled()) return false
+        if (!initFluidSynth()) return false
+        val path = ensureBundledDefaultSf2(context) ?: return false
+        return loadSoundFontFromPath(path)
     }
 
     fun close() {
@@ -119,11 +143,6 @@ class OboeSynthesizer {
     private external fun nativePitchBend(handle: Long, channel: Int, bend14: Int)
     private external fun nativeChannelPressure(handle: Long, channel: Int, pressure: Int)
     private external fun nativeControlChange(handle: Long, channel: Int, cc: Int, value: Int)
-    private external fun nativeSetFilterCutoff(handle: Long, channel: Int, cutoffHz: Float)
-    private external fun nativeSetEnvelope(handle: Long, channel: Int, attackMs: Float, decayMs: Float, sustainLevel: Float, releaseMs: Float)
-    private external fun nativeSetWaveform(handle: Long, index: Int)
-    private external fun nativeLoadWavetableFromDirectBuffer(handle: Long, buffer: java.nio.ByteBuffer?, size: Long)
-    private external fun nativeRegisterSample(handle: Long, buffer: java.nio.ByteBuffer?, size: Long, rootNote: Int, loKey: Int, hiKey: Int, name: String?)
     private external fun nativeLoadSoundFont(handle: Long, path: String?): Boolean
     private external fun nativeInitFluidSynth(handle: Long): Boolean
     private external fun nativeShutdownFluidSynth(handle: Long): Boolean
@@ -133,18 +152,5 @@ class OboeSynthesizer {
         return nativeIsFluidSynthCompiled()
     }
     private external fun nativeIsFluidSynthCompiled(): Boolean
-
-    fun getLoadedSampleNames(): Array<String> {
-        if (nativeHandle == 0L) return arrayOf()
-        return nativeGetLoadedSampleNames(nativeHandle) ?: arrayOf()
-    }
-
-    fun unloadSample(index: Int) {
-        if (nativeHandle == 0L) return
-        nativeUnloadSample(nativeHandle, index)
-    }
-
-    private external fun nativeGetLoadedSampleNames(handle: Long): Array<String>?
-    private external fun nativeUnloadSample(handle: Long, index: Int)
 }
 

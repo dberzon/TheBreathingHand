@@ -30,7 +30,7 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
             when (command) {
                 0x80 -> { // Note Off
                     val note = data1
-                    val v = noteToVoice.getOrNull(note) ?: -1
+                    val v = if (note in noteToVoice.indices) noteToVoice[note] else -1
                     if (v != -1) {
                         synth.noteOff(v, note)
                         noteToVoice[note] = -1
@@ -43,7 +43,7 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
                     val vel = data2
                     if (vel == 0) {
                         // NoteOn with zero velocity -> NoteOff
-                        val v = noteToVoice.getOrNull(note) ?: -1
+                        val v = if (note in noteToVoice.indices) noteToVoice[note] else -1
                         if (v != -1) {
                             synth.noteOff(v, note)
                             noteToVoice[note] = -1
@@ -54,7 +54,7 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
                     }
 
                     // If this note already has a voice, retrigger it
-                    var v = noteToVoice.getOrNull(note) ?: -1
+                    var v = if (note in noteToVoice.indices) noteToVoice[note] else -1
                     if (v == -1) {
                         // Find free voice
                         var found = -1
@@ -87,12 +87,13 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
                     val cc = data1
                     val value = data2
                     if (cc == 71) {
-                        // CC71 -> filter cutoff for all voices
-                        val vNorm = value / 127.0
-                        val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
-                        for (i in 0 until MAX_SYNTH_VOICES) {
-                            synth.setFilterCutoff(i, cutoff)
-                        }
+                        // CC71 -> filter cutoff for all voices (disabled - method removed)
+                        // TODO: setFilterCutoff removed - FluidSynth replacement needed
+                        // val vNorm = value / 127.0
+                        // val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+                        // for (i in 0 until MAX_SYNTH_VOICES) {
+                        //     synth.setFilterCutoff(i, cutoff)
+                        // }
                     } else {
                         // Forward other CCs to all voices
                         for (i in 0 until MAX_SYNTH_VOICES) {
@@ -126,10 +127,11 @@ class OboeMidiSink(private val synth: OboeSynthesizer) : MidiSink {
                 val cc = data1
                 val value = data2
                 if (cc == 71) {
-                    // Map 0..127 -> 20Hz..12000Hz exponentially
-                    val vNorm = value / 127.0
-                    val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
-                    synth.setFilterCutoff(synthChannel, cutoff)
+                    // Map 0..127 -> 20Hz..12000Hz exponentially (disabled - method removed)
+                    // TODO: setFilterCutoff removed - FluidSynth replacement needed
+                    // val vNorm = value / 127.0
+                    // val cutoff = (20.0 * Math.pow(12000.0 / 20.0, vNorm)).toFloat()
+                    // synth.setFilterCutoff(synthChannel, cutoff)
                 } else {
                     synth.controlChange(synthChannel, data1, data2)
                 }

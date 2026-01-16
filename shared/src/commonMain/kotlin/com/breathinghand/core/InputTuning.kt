@@ -14,8 +14,10 @@ object InputTuning {
     // -----------------------------------------------------------------
     // 1) SIGNAL CONDITIONING (1 Euro Filter)
     // -----------------------------------------------------------------
+    // Tuned for MUSICAL RESPONSIVENESS (not visual smoothness).
+    // Higher beta = faster adaptation during fast gestures (reduces musical latency).
     const val FILTER_MIN_CUTOFF = 1.0f  // Hz (silences <0.4px jitter)
-    const val FILTER_BETA = 0.02f       // (reduces lag at high velocity)
+    const val FILTER_BETA = 0.05f       // Instrument tuning: rapid response during fast gestures
 
     // -----------------------------------------------------------------
     // 2) SPATIAL LOGIC (Hysteresis)
