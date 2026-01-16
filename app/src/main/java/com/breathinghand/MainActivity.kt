@@ -81,6 +81,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var overlay: HarmonicOverlayView
     private lateinit var externalRoutingSwitch: Switch // External MIDI selector (MPE multi-channel / General MIDI single-channel)
+    private var calibrationView: CalibrationView? = null
 
     // SF2 file picker
     private val pickSf2Launcher = registerForActivityResult(
@@ -258,6 +259,19 @@ class MainActivity : AppCompatActivity() {
 
         container.addView(fluidsynthSwitch)
 
+        // 6. Calibration View (Debug Overlay - Bottom Left)
+        calibrationView = CalibrationView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                setMargins(16, 0, 0, 16)
+            }
+            initialize(harmonicEngine)
+        }
+        container.addView(calibrationView)
+
         // Set the container as the activity content
         setContentView(container)
     }
@@ -390,10 +404,23 @@ class MainActivity : AppCompatActivity() {
         // at the Activity level, we intercept everything not caught by views.
         // The Switch will handle its own touches. We process the rest for music.
 
+        // TELEMETRY: Raw touch capture (BEFORE touchDriver.ingest() for zero-latency recording)
+        // Capture all active pointers on each event to get complete raw signal
+        val actionMasked = event.actionMasked
+        if (TelemetryRecorder.isRecording()) {
+            val pointerCount = event.pointerCount
+            for (i in 0 until pointerCount) {
+                val pointerId = event.getPointerId(i)
+                val x = event.getX(i)
+                val y = event.getY(i)
+                // Record with the masked action (ACTION_DOWN, ACTION_MOVE, ACTION_POINTER_UP, etc.)
+                TelemetryRecorder.recordTouch(actionMasked, pointerId, x, y)
+            }
+        }
+
         // SNAPSHOT BOUNDARY:
         // MotionEvent -> AndroidTouchDriver.ingest() happens exactly once,
         // then BOTH HarmonicState and activePointerIds are derived from touchFrame (same snapshot).
-        val actionMasked = event.actionMasked
 
         // Full lift / cancel: handle immediately and cancel any pending coalesced flush.
         if (actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_CANCEL) {
@@ -679,6 +706,23 @@ class MainActivity : AppCompatActivity() {
                     MidiLogger.logHarmony(harmonicEngine.state)
                 }
 
+                // TELEMETRY: Analyzer snapshot capture (after HarmonicEngine.update())
+                // Captures what the instrument *believes* is happening (derived features)
+                if (TelemetryRecorder.isRecording() && touchState.isActive) {
+                    val state = harmonicEngine.state
+                    TelemetryRecorder.recordSnapshot(
+                        fingerCount = fCount,
+                        centroidX = touchState.centerX,
+                        centroidY = touchState.centerY,
+                        spread = spreadSmooth,
+                        instability = state.harmonicInstability,
+                        triadArchetype = gestureAnalyzer.latchedTriad,
+                        seventhArchetype = gestureAnalyzer.latchedSeventh,
+                        rootPc = state.rootPc,
+                        sector = state.functionSector
+                    )
+                }
+
                 // Tell VoiceLeader whether we are in rhythmic-only cascade windows.
                 val inReleaseCascade = (fCount > 0 && touchFrame.tMs < releaseCascadeUntilMs)
                 voiceLeader?.setReleaseCascadeActive(inReleaseCascade)
@@ -691,6 +735,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             invalidateIfVisualChanged()
+
+            // Update calibration view feedback
+            calibrationView?.updateFeedback()
         } catch (e: Exception) {
             e.printStackTrace()
         }
