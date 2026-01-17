@@ -17,6 +17,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.breathinghand.audio.OboeSynthesizer
 import com.breathinghand.core.*
 import com.breathinghand.core.midi.AndroidForensicLogger
+import com.breathinghand.engine.GestureAnalyzer
 import com.breathinghand.core.midi.AndroidMonotonicClock
 import com.breathinghand.core.midi.AndroidMidiSink
 import com.breathinghand.core.midi.FanOutMidiSink
@@ -37,7 +38,7 @@ class MainActivity : AppCompatActivity() {
     private val radiusFilter = OneEuroFilter()
 
     private lateinit var harmonicEngine: HarmonicEngine
-    private lateinit var gestureAnalyzer: GestureAnalyzerV01
+    private lateinit var gestureAnalyzer: GestureAnalyzer
     private lateinit var timbreNav: TimbreNavigator
     private val transitionWindow = TransitionWindow()
 
@@ -98,6 +99,10 @@ class MainActivity : AppCompatActivity() {
     private val gestureContainer = TimbreNavigator.MutableGesture()
     private var lastPointerCount = 0
 
+    // Pre-allocated arrays for gesture analyzer (zero-alloc hot path)
+    private val activeX = FloatArray(MusicalConstants.MAX_VOICES)
+    private val activeY = FloatArray(MusicalConstants.MAX_VOICES)
+
     // Release-cascade suppression (rhythmic-only): prevent re-voicing/note-ons during multi-finger lift collapse.
     private var releaseCascadeUntilMs: Long = 0L
 
@@ -128,7 +133,7 @@ class MainActivity : AppCompatActivity() {
         r1Px = MusicalConstants.BASE_RADIUS_INNER * density
         r2Px = MusicalConstants.BASE_RADIUS_OUTER * density
 
-        gestureAnalyzer = GestureAnalyzerV01(r1Px, r2Px)
+        gestureAnalyzer = GestureAnalyzer()
         harmonicEngine = HarmonicEngine()
         timbreNav = TimbreNavigator(
             maxPointerId = MusicalConstants.MAX_POINTER_ID,
@@ -591,6 +596,24 @@ class MainActivity : AppCompatActivity() {
         return n
     }
 
+    /**
+     * Extract active pointer coordinates into contiguous arrays for GestureAnalyzer.
+     * Zero-allocation hot path: reuses pre-allocated arrays.
+     * @return number of active pointers
+     */
+    private fun extractActiveCoordinates(): Int {
+        var n = 0
+        for (s in 0 until MusicalConstants.MAX_VOICES) {
+            val pid = touchFrame.pointerIds[s]
+            if (pid == TouchFrame.INVALID_ID) continue
+            if ((touchFrame.flags[s] and TouchFrame.F_UP) != 0) continue
+            activeX[n] = touchFrame.x[s]
+            activeY[n] = touchFrame.y[s]
+            n++
+        }
+        return n
+    }
+
     // Rule 13: Performance Is a Musical Requirement — Zero allocation hot path confirmed (pre-allocated buffer).
     // SNAPSHOT BOUNDARY: TouchFrame is ingested once per event; harmony + activePointers derive from the same frame.
     private fun processTouchSnapshot(): Boolean {
@@ -616,12 +639,6 @@ class MainActivity : AppCompatActivity() {
                 releaseCascadeUntilMs = 0L
             }
 
-            var semanticEvent = when {
-                landing -> GestureAnalyzerV01.EVENT_LANDING
-                addFinger -> GestureAnalyzerV01.EVENT_ADD_FINGER
-                else -> GestureAnalyzerV01.EVENT_NONE
-            }
-
             // Rule 7: The Transition Window Is Rhythmic Only — Preserves harmonic state for rhythmic re-articulation, never gates harmony.
             var transitionHit = false
             if (landing) {
@@ -637,8 +654,8 @@ class MainActivity : AppCompatActivity() {
                         transitionWindow.storedState,
                         touchState.angle
                     )
-                    gestureAnalyzer.seedFromState(transitionWindow.storedState)
-                    semanticEvent = GestureAnalyzerV01.EVENT_NONE
+                    // Transition window restores state directly to harmonicEngine.state
+                    // GestureAnalyzer will process it on the next frame
                 } else {
                     transitionWindow.disarm()
                 }
@@ -740,15 +757,16 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                // 1. Analyze Geometry -> Semantics (continuous, writes to harmonicEngine.state)
                 if (!transitionHit) {
-                    gestureAnalyzer.onSemanticEvent(touchFrame, fCount, spreadSmooth, semanticEvent)
+                    val activeCount = extractActiveCoordinates()
+                    gestureAnalyzer.analyze(activeCount, activeX, activeY, harmonicEngine.state)
                 }
 
-                if (semanticEvent != GestureAnalyzerV01.EVENT_NONE && MusicalConstants.IS_DEBUG) {
-                    val evtName = if (semanticEvent == GestureAnalyzerV01.EVENT_LANDING) "LAND" else "ADD"
+                if (landing && MusicalConstants.IS_DEBUG) {
                     Log.d(
                         TAG_SEM,
-                        "${touchFrame.tMs},$evtName,f=$fCount,triad=${gestureAnalyzer.latchedTriad},sev=${gestureAnalyzer.latchedSeventh}"
+                        "${touchFrame.tMs},LAND,f=$fCount,triad=${harmonicEngine.state.triad},sev=${harmonicEngine.state.seventh}"
                     )
                 }
 
@@ -756,6 +774,7 @@ class MainActivity : AppCompatActivity() {
                     if (overlay.height > 0) (touchState.centerY / overlay.height.toFloat()) else 0.5f
 
                 // Rule 4: Continuous Morphing Is Fundamental — Harmony evolves continuously during play.
+                // Note: harmonicInstability is now computed by GestureAnalyzer and written to state.
                 val changed = if (!transitionHit) {
                     harmonicEngine.update(
                         touchFrame.tMs,
@@ -763,8 +782,8 @@ class MainActivity : AppCompatActivity() {
                         spreadSmooth,
                         centerYNorm,
                         fCount,
-                        gestureAnalyzer.latchedTriad,
-                        gestureAnalyzer.latchedSeventh
+                        harmonicEngine.state.triad,
+                        harmonicEngine.state.seventh
                     )
                 } else {
                     false
@@ -787,8 +806,8 @@ class MainActivity : AppCompatActivity() {
                         centroidY = touchState.centerY,
                         spread = spreadSmooth,
                         instability = state.harmonicInstability,
-                        triadArchetype = gestureAnalyzer.latchedTriad,
-                        seventhArchetype = gestureAnalyzer.latchedSeventh,
+                        triadArchetype = state.triad,
+                        seventhArchetype = state.seventh,
                         rootPc = state.rootPc,
                         sector = state.functionSector
                     )

@@ -28,6 +28,10 @@ class HarmonicEngine {
         lastAngleTimeMs = 0L
     }
 
+    // NOTE (v0.2):
+    // spreadPx and centerYNorm are kept for API compatibility with older call sites,
+    // but are not used anymore. Instability is computed by GestureAnalyzer and written
+    // into state before update() is called.
     fun update(
         nowMs: Long,
         angleRad: Float,
@@ -64,11 +68,13 @@ class HarmonicEngine {
         // Rule 3: Modification Over Replacement — Adding fingers adds layers, removing removes only those layers.
         val fc = fingerCount.coerceIn(0, 4)
         state.fingerCount = fc
-        state.triad = if (fc >= 3) triadArchetype else GestureAnalyzerV01.TRIAD_NONE
-        state.seventh = if (fc >= 4) seventhArchetype else GestureAnalyzerV01.SEVENTH_NONE
+        // Triad/seventh archetypes are set by GestureAnalyzer and passed as parameters.
+        // We only override to NONE when finger count drops below threshold.
+        state.triad = if (fc >= 3) triadArchetype else 0  // 0 = TRIAD_NONE
+        state.seventh = if (fc >= 4) seventhArchetype else 0  // 0 = SEVENTH_NONE
 
-        // Rule 8: Closed / Collapsed Grip Means Instability — Smaller spread maps to continuous instability (no mode switch).
-        state.harmonicInstability = spreadToInstability(spreadPx)
+        // Rule 8: Closed / Collapsed Grip Means Instability — harmonicInstability is now computed by GestureAnalyzer
+        // and written to state before this update() call. We no longer recompute it here.
 
         val rawSector = quantizeAngleToSector(angleRad)
         // Rule 5: Stability Comes From Physics, Not Permission — Hysteresis provides physical resistance, not gating.

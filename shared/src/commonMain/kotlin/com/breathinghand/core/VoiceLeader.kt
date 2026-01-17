@@ -9,11 +9,13 @@ import kotlin.math.pow
  *
  * Note assignment (layer roles):
  * - Notes are assigned by ROLE (layer) and mapped to active slots.
- * - Roles are stable on finger-add, and compact on finger-remove, so:
- * - 1 finger always becomes reference/root role (role 0)
- * - 2 fingers => roles 0..1 (root + fifth)
- * - 3 fingers => roles 0..2 (+ triad layer)
- * - 4 fingers => roles 0..3 (+ seventh layer)
+ * - Roles are assigned on finger-add (lowest unused role) and do not change for surviving fingers.
+ * - On finger-remove, only the removed slot is cleared; remaining fingers keep their roles.
+ * - Roles map to layers:
+ *   - Role 0: root layer
+ *   - Role 1: fifth layer
+ *   - Role 2: triad-color layer
+ *   - Role 3: seventh/extension layer
  *
  * KMP-safe: no android.* imports.
  * Zero allocations in update hot path.
@@ -131,24 +133,7 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
 
         val activeNow = countActiveSlots()
 
-        // 2) Update cached harmonic snapshot if it changed (NO gating / permission semantics)
-        val harmonicChanged =
-            input.rootPc != lastRootPc ||
-            input.fingerCount != lastFingerCount ||
-            input.triad != lastTriad ||
-            input.seventh != lastSeventh ||
-            (input.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD) != lastUnstable
-
-        if (harmonicChanged) {
-            lastRootPc = input.rootPc
-            lastFingerCount = input.fingerCount
-            lastTriad = input.triad
-            lastSeventh = input.seventh
-            lastUnstable = input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
-            HarmonicFieldMapV01.fillRoleNotes(input, roleNotes)
-        }
-
-        // 3) Rhythmic-only cascade suppressions:
+        // 2) Rhythmic-only cascade suppressions:
         // Release: allocation already emitted note-offs; suppress any re-voicing/note-ons briefly.
         if (releaseCascadeActive) {
             lastActiveCount = activeNow
@@ -161,6 +146,24 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
             lastActiveCount = activeNow
             flushContinuous()
             return
+        }
+
+        // 3) Update cached harmonic snapshot if it changed (NO gating / permission semantics)
+        val unstableNow = input.harmonicInstability >= MusicalConstants.INSTABILITY_THRESHOLD
+        val harmonicChanged =
+            input.rootPc != lastRootPc ||
+            input.fingerCount != lastFingerCount ||
+            input.triad != lastTriad ||
+            input.seventh != lastSeventh ||
+            unstableNow != lastUnstable
+
+        if (harmonicChanged) {
+            lastRootPc = input.rootPc
+            lastFingerCount = input.fingerCount
+            lastTriad = input.triad
+            lastSeventh = input.seventh
+            lastUnstable = unstableNow
+            HarmonicFieldMapV01.fillRoleNotes(input, roleNotes)
         }
 
         // 4) Normal note logic
@@ -357,20 +360,18 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
     }
 
     /**
-     * Role assignment:
-     * - New fingers get the next available role (no replacement).
-     * - On finger removal, roles are compacted in ascending prior-role order, so
-     * the remaining finger(s) become roles 0..N-1.
+     * Role assignment (Policy A — NO COMPACTION):
+     * - New fingers get the next available role (lowest unused 0..3), deterministic by slot order.
+     * - On finger removal, ONLY the removed slot loses its role; surviving roles never change.
      *
-     * This guarantees: 1 finger always becomes the reference/root role (role 0).
+     * This strictly preserves Rule 3: removing fingers removes layers, not re-labels harmony.
      */
     private fun updateRolesByFingerChanges() {
-        // Build active slot list
+        // Build active slot list and clear inactive roles
         var nActive = 0
         for (slot in 0 until MusicalConstants.MAX_VOICES) {
             if (voices[slot].pointerId != TouchFrame.INVALID_ID) {
-                activeSlotsScratch[nActive] = slot
-                nActive++
+                activeSlotsScratch[nActive++] = slot
             } else {
                 roleBySlot[slot] = -1
             }
@@ -384,77 +385,31 @@ class VoiceLeader(private val output: MidiOutput) { // CHANGED: midi -> output
         // Used roles bitmask among currently active slots
         var usedMask = 0
         for (i in 0 until nActive) {
-            val slot = activeSlotsScratch[i]
-            val r = roleBySlot[slot]
+            val r = roleBySlot[activeSlotsScratch[i]]
             if (r in 0..3) usedMask = usedMask or (1 shl r)
         }
 
-        if (nActive > lastActiveCount) {
-            // Addition: assign next roles to newly active slots (role==-1), deterministic by slot order.
-            for (i in 0 until nActive) {
-                val slot = activeSlotsScratch[i]
-                if (roleBySlot[slot] != -1) continue
+        // Addition / repair: assign roles to newly active slots (role==-1), deterministic by slot order.
+        for (i in 0 until nActive) {
+            val slot = activeSlotsScratch[i]
+            if (roleBySlot[slot] != -1) continue
 
-                var nextRole = -1
-                for (r in 0..3) {
-                    if ((usedMask and (1 shl r)) == 0) {
-                        nextRole = r
-                        break
-                    }
+            var nextRole = -1
+            for (r in 0..3) {
+                if ((usedMask and (1 shl r)) == 0) {
+                    nextRole = r
+                    break
                 }
-                // If roles 0..3 are all used, leave as -1 (extra finger is silent in v0.1).
-                if (nextRole != -1) {
-                    roleBySlot[slot] = nextRole
-                    usedMask = usedMask or (1 shl nextRole)
-                }
-            }
-        } else if (nActive < lastActiveCount) {
-            // Removal: compact roles by ascending prior-role.
-            // Insertion sort activeSlotsScratch by roleBySlot[slot].
-            for (i in 1 until nActive) {
-                val s = activeSlotsScratch[i]
-                val rS = roleRank(roleBySlot[s])
-                var j = i - 1
-                while (j >= 0) {
-                    val sj = activeSlotsScratch[j]
-                    val rJ = roleRank(roleBySlot[sj])
-                    if (rJ <= rS) break
-                    activeSlotsScratch[j + 1] = sj
-                    j--
-                }
-                activeSlotsScratch[j + 1] = s
             }
 
-            // Reassign roles 0..(nActive-1) up to 3. Anything beyond is silent.
-            for (i in 0 until nActive) {
-                val slot = activeSlotsScratch[i]
-                roleBySlot[slot] = if (i <= 3) i else -1
-            }
-        } else {
-            // Same count: keep roles.
-            // If any active slot is missing a role (rare), assign next available deterministically.
-            for (i in 0 until nActive) {
-                val slot = activeSlotsScratch[i]
-                if (roleBySlot[slot] != -1) continue
-                var nextRole = -1
-                for (r in 0..3) {
-                    if ((usedMask and (1 shl r)) == 0) {
-                        nextRole = r
-                        break
-                    }
-                }
-                if (nextRole != -1) {
-                    roleBySlot[slot] = nextRole
-                    usedMask = usedMask or (1 shl nextRole)
-                }
+            // If roles 0..3 are all used, leave as -1 (extra finger is silent).
+            if (nextRole != -1) {
+                roleBySlot[slot] = nextRole
+                usedMask = usedMask or (1 shl nextRole)
             }
         }
 
         lastActiveCount = nActive
-    }
-
-    private fun roleRank(role: Int): Int {
-        return if (role in 0..3) role else 999
     }
 
     private fun updateTargetsByRole() {
