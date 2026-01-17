@@ -37,9 +37,7 @@ class HarmonicEngine {
         angleRad: Float,
         spreadPx: Float,
         centerYNorm: Float,
-        fingerCount: Int,
-        triadArchetype: Int,
-        seventhArchetype: Int
+        activeSlotMask: Int // Used for inertia resets
     ): Boolean {
         val prevSector = state.functionSector
         val prevPc = state.rootPc
@@ -48,9 +46,9 @@ class HarmonicEngine {
         val prevTriad = state.triad
         val prevSev = state.seventh
 
-        if (!hasTouch) {
-            // Rule 2: Harmony Is Always Alive — Landing produces sound immediately.
-            // LANDING SEED (critical):
+        // 1. Landing Logic
+        if (activeSlotMask != 0 && !hasTouch) {
+            hasTouch = true
             // Seed from the first valid angle immediately to avoid a "bias chord" flash
             // that only corrects after dwell. Vertical bias is gravity, not an audible
             // wrong sector on attack.
@@ -62,20 +60,12 @@ class HarmonicEngine {
             // Seed angular velocity integrator so first-frame velocity is 0.
             lastAngleRad = angleRad
             lastAngleTimeMs = nowMs
-            hasTouch = true
+        } else if (activeSlotMask == 0) {
+            hasTouch = false
         }
 
-        // Rule 3: Modification Over Replacement — Adding fingers adds layers, removing removes only those layers.
-        val fc = fingerCount.coerceIn(0, 4)
-        state.fingerCount = fc
-        // Triad/seventh archetypes are set by GestureAnalyzer and passed as parameters.
-        // We only override to NONE when finger count drops below threshold.
-        state.triad = if (fc >= 3) triadArchetype else 0  // 0 = TRIAD_NONE
-        state.seventh = if (fc >= 4) seventhArchetype else 0  // 0 = SEVENTH_NONE
-
-        // Rule 8: Closed / Collapsed Grip Means Instability — harmonicInstability is now computed by GestureAnalyzer
-        // and written to state before this update() call. We no longer recompute it here.
-
+        // 2. Continuous Logic (Root/Sector)
+        // Angle quantization, Hysteresis, Dwell - This code touches state.rootPc, state.functionSector
         val rawSector = quantizeAngleToSector(angleRad)
         // Rule 5: Stability Comes From Physics, Not Permission — Hysteresis provides physical resistance, not gating.
         val hysteresisSector = applyAngularHysteresis(state.functionSector, rawSector, angleRad)

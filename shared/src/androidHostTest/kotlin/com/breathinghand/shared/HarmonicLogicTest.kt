@@ -1,6 +1,7 @@
 package com.breathinghand.shared
 
 import com.breathinghand.core.*
+import com.breathinghand.engine.GestureAnalyzer
 import kotlin.math.PI
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -15,8 +16,8 @@ class HarmonicLogicTest {
 
         // Setup: 4 fingers, Fan shape (normally Major 7th)
         state.fingerCount = 4
-        state.triad = GestureAnalyzerV01.TRIAD_FAN
-        state.seventh = GestureAnalyzerV01.SEVENTH_COMPACT
+        state.triad = GestureAnalyzer.TRIAD_FAN
+        state.seventh = GestureAnalyzer.SEVENTH_COMPACT
         state.rootPc = 0 // C
 
         // Case A: Stable (Open hand) -> Should be Major 7 (C, G, E, B)
@@ -64,7 +65,7 @@ class HarmonicLogicTest {
 
         // 3 Fingers: Add Color
         state.fingerCount = 3
-        state.triad = GestureAnalyzerV01.TRIAD_FAN // Major
+        state.triad = GestureAnalyzer.TRIAD_FAN // Major
         count = HarmonicFieldMapV01.fillRoleNotes(state, roles)
         assertEquals(3, count)
         assertEquals(64, roles[2]) // Adds E (M3)
