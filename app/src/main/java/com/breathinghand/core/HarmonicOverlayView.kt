@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.view.View
+import com.breathinghand.engine.GestureAnalyzer
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
@@ -15,6 +16,7 @@ private fun midiToName(m: Int): String {
     val octave = m / 12 - 1
     return "${NOTE_NAMES[pc]}$octave"
 }
+
 
 class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -64,9 +66,9 @@ class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) 
         )
         paint.strokeWidth = 5f // reset
 
-        // 4) Chord display — show real-time chord notes computed from HarmonicFieldMapV01
+        // 4) Chord display — show real-time chord notes computed from v0.2 mapping
         val roleNotes = IntArray(4)
-        val roleCount = HarmonicFieldMapV01.fillRoleNotes(s, roleNotes)
+        val roleCount = HarmonicNoteMapV02.computeNotes(s, roleNotes)
         if (roleCount > 0) {
             val names = mutableListOf<String>()
             for (i in 0 until roleCount) {
@@ -76,8 +78,8 @@ class HarmonicOverlayView(context: Context, private val engine: HarmonicEngine) 
 
             val quality = when {
                 s.harmonicInstability > MusicalConstants.INSTABILITY_THRESHOLD -> "dim"
-                s.triad == GestureAnalyzerV01.TRIAD_STRETCH -> "min"
-                s.triad == GestureAnalyzerV01.TRIAD_CLUSTER -> "sus4"
+                s.triad == GestureAnalyzer.TRIAD_STRETCH -> "min"
+                s.triad == GestureAnalyzer.TRIAD_CLUSTER -> "sus4"
                 else -> "maj"
             }
 

@@ -4,7 +4,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 
 class HarmonicEngine {
-    // Single Source of Truth from Core_Data_Structures.kt
+    // Single Source of Truth from HarmonicState.kt
     val state: HarmonicState = HarmonicState()
 
     private var hasTouch: Boolean = false

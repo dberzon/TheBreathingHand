@@ -23,7 +23,7 @@ internal expect object DebugLogger {
 class VoiceLeader {
 
     companion object {
-        private const val INSTABILITY_THRESHOLD = 0.5f
+        private const val INSTABILITY_THRESHOLD = MusicalConstants.INSTABILITY_THRESHOLD
         private const val CHANNEL_OFFSET = 1
     }
 

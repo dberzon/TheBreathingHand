@@ -11,6 +11,7 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import com.breathinghand.engine.GestureAnalyzer
 import kotlinx.coroutines.*
 import java.io.File
 
@@ -173,14 +174,14 @@ class CalibrationView @JvmOverloads constructor(
 
         val archetypeStr = when {
             seventh != 0 -> when (seventh) {
-                GestureAnalyzerV01.SEVENTH_COMPACT -> "COMPACT"
-                GestureAnalyzerV01.SEVENTH_WIDE -> "WIDE"
+                GestureAnalyzer.SEVENTH_COMPACT -> "COMPACT"
+                GestureAnalyzer.SEVENTH_WIDE -> "WIDE"
                 else -> "UNKNOWN"
             }
             triad != 0 -> when (triad) {
-                GestureAnalyzerV01.TRIAD_FAN -> "FAN"
-                GestureAnalyzerV01.TRIAD_STRETCH -> "STRETCH"
-                GestureAnalyzerV01.TRIAD_CLUSTER -> "CLUSTER"
+                GestureAnalyzer.TRIAD_FAN -> "FAN"
+                GestureAnalyzer.TRIAD_STRETCH -> "STRETCH"
+                GestureAnalyzer.TRIAD_CLUSTER -> "CLUSTER"
                 else -> "UNKNOWN"
             }
             else -> "NONE"

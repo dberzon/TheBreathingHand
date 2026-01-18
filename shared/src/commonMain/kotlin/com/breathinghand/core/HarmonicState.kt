@@ -19,10 +19,10 @@ data class HarmonicState(
     /** Active finger count (0..4 for v0.2 layering). */
     var fingerCount: Int = 0,
 
-    /** Latched triad archetype (GestureAnalyzerV01.TRIAD_*). 0 == NONE. */
+    /** Latched triad archetype (GestureAnalyzer.TRIAD_*). 0 == NONE. */
     var triad: Int = 0,
 
-    /** Latched seventh archetype (GestureAnalyzerV01.SEVENTH_*). 0 == NONE. */
+    /** Latched seventh archetype (GestureAnalyzer.SEVENTH_*). 0 == NONE. */
     var seventh: Int = 0
 ) {
     /** Zero-allocation copy used by TransitionWindow/restores. */
