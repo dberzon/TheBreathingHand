@@ -1,6 +1,7 @@
 package com.breathinghand.core.midi
 
 import android.view.MotionEvent
+import com.breathinghand.core.MusicalConstants
 
 /**
  * TOUCH SOURCE (Semantic Geometry)

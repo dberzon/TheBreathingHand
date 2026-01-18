@@ -29,7 +29,7 @@ import com.breathinghand.core.midi.VoiceLeader
 import com.breathinghand.core.midi.VoiceAllocator
 import com.breathinghand.core.midi.TouchSource
 import com.breathinghand.core.midi.AndroidMidiOutput
-import com.breathinghand.core.midi.MusicalConstants
+import com.breathinghand.core.MusicalConstants
 import java.io.IOException
 import com.breathinghand.MidiLogger
 import kotlinx.coroutines.*

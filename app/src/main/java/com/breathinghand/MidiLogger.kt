@@ -3,7 +3,7 @@ package com.breathinghand
 import android.os.SystemClock
 import android.util.Log
 import com.breathinghand.core.HarmonicState
-import com.breathinghand.core.midi.MusicalConstants
+import com.breathinghand.core.MusicalConstants
 
 object MidiLogger {
     private const val TAG = "FORENSIC_DATA"

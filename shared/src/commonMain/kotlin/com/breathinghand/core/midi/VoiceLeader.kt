@@ -1,6 +1,7 @@
 package com.breathinghand.core.midi
 
 import com.breathinghand.core.HarmonicState
+import com.breathinghand.core.MusicalConstants
 import com.breathinghand.engine.GestureAnalyzer
 
 // Debug logging: platform-specific implementation via expect/actual
